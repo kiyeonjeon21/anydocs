@@ -7,7 +7,7 @@ import pytest
 from anydocs.chunk import anchor_slug, chunk_page
 from anydocs.ingest.fetch import SoftNotFound, validate_markdown
 from anydocs.models import Page
-from anydocs.query import clean_snippet, compile_query
+from anydocs.query import clean_snippet, compile_query, query_units
 
 
 class FakeResponse:
@@ -42,7 +42,7 @@ def test_soft_404_is_rejected():
     ],
 )
 def test_compile_query(raw, expect_first):
-    assert compile_query(raw)[0] == expect_first
+    assert " ".join(query_units(raw)) == expect_first
 
 
 def test_compile_query_survives_fts5_operators():
@@ -59,8 +59,7 @@ def test_compile_query_survives_fts5_operators():
 
 
 def test_compile_query_all_stopwords_still_matches():
-    assert compile_query("how do I") == ['"how" "do" "I"', '"how" OR "do" OR "I"',
-                                         '"how"* OR "do"* OR "I"*']
+    assert compile_query("how do I") == ['"how" OR "do" OR "I"', '"how"* OR "do"* OR "I"*']
     assert compile_query("!!!") == []
 
 
@@ -105,6 +104,22 @@ def test_chunker_ignores_headings_inside_code_fences():
     chunks = chunk_page(page)
     assert [c.heading for c in chunks] == ["Real heading"]
     assert "not a heading" in chunks[0].body
+
+
+def test_chunker_splits_a_giant_table():
+    """A markdown table has no blank lines, so paragraph splitting cannot touch
+    it — Claude Code's settings page shipped as one 148 KB chunk until this."""
+    rows = "\n".join(f"| `key_{i}` | description number {i} |" for i in range(400))
+    page = Page(
+        source="s", path="p", url="u", title="T", description="",
+        body=f"## Available settings\n\n| Key | Description |\n| --- | --- |\n{rows}\n",
+    )
+    chunks = chunk_page(page)
+    assert len(chunks) > 1
+    assert max(len(c.body) for c in chunks) <= 4000
+    # Every part repeats the header, or a fragment is nameless columns of values.
+    assert all("| Key | Description |" in c.body for c in chunks)
+    assert "`key_399`" in chunks[-1].body
 
 
 def test_chunker_builds_breadcrumbs():

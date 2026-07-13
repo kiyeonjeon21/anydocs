@@ -54,19 +54,47 @@ def anchor_slug(heading: str, style: str = "collapse") -> str:
     return text
 
 
+TABLE_ROW = re.compile(r"^\s*\|")
+
+
+def _pack(blocks: list[str], sep: str, prefix: str = "") -> list[str]:
+    """Greedily fill chunks up to MAX_CHUNK, never splitting a block."""
+    parts, buf = [], ""
+    for block in blocks:
+        if buf and len(prefix) + len(buf) + len(sep) + len(block) > MAX_CHUNK:
+            parts.append(prefix + buf)
+            buf = block
+        else:
+            buf = f"{buf}{sep}{block}" if buf else block
+    if buf:
+        parts.append(prefix + buf)
+    return parts
+
+
+def _split_block(block: str) -> list[str]:
+    """Split one over-long paragraph.
+
+    In practice this is always a big markdown table — the reference pages are
+    built from them, and a table has no blank lines, so paragraph splitting
+    cannot touch it (Claude Code's settings page holds a single 148 KB table).
+    Break it by rows and repeat the header on every part, or the fragments are
+    unreadable columns of values with nothing to name them.
+    """
+    lines = block.splitlines()
+    header = ""
+    if len(lines) >= 2 and TABLE_ROW.match(lines[0]) and set(lines[1].strip()) <= set("|-: "):
+        header = "\n".join(lines[:2]) + "\n"
+        lines = lines[2:]
+    return _pack([ln[:MAX_CHUNK] for ln in lines], "\n", header)
+
+
 def _split_long(body: str) -> list[str]:
     if len(body) <= MAX_CHUNK:
         return [body]
-    parts, buf = [], ""
+    blocks: list[str] = []
     for para in body.split("\n\n"):
-        if buf and len(buf) + len(para) + 2 > MAX_CHUNK:
-            parts.append(buf)
-            buf = para
-        else:
-            buf = f"{buf}\n\n{para}" if buf else para
-    if buf:
-        parts.append(buf)
-    return parts
+        blocks.extend([para] if len(para) <= MAX_CHUNK else _split_block(para))
+    return _pack(blocks, "\n\n")
 
 
 def chunk_page(page: Page, style: str = "collapse") -> list[Chunk]:

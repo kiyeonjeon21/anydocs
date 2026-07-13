@@ -1,102 +1,139 @@
-"""Compare query strategies against the real index. Empirical, not theoretical."""
+"""Score retrieval strategies against a gold set. Empirical, not theoretical.
+
+Each case names the page a competent human would open. A strategy is judged on
+whether that page appears at rank 1 (hit@1) and in the top 3 (hit@3).
+"""
 
 from __future__ import annotations
 
-import re
+import argparse
 import sqlite3
 import sys
-from pathlib import Path
+from dataclasses import dataclass
 
-DB = Path(__file__).resolve().parent.parent / "build" / "anydocs.db"
-TERM = re.compile(r"[0-9A-Za-zÀ-ɏ]+")
+from anydocs.artifact import ensure_index
+from anydocs.index import connect
+from anydocs.query import BM25_WEIGHTS, POOL, SEARCH_SQL, SNIPPET_TOKENS, query_units
 
-QUERIES = [
-    "--dangerously-skip-permissions",
-    "PreToolUse hook matcher",
-    "how do I add a hook",
-    "AGENTS.md",
-    "grok model list",
-    "MCP server configuration",
+
+def doc_freq(conn: sqlite3.Connection, unit: str) -> int:
+    try:
+        return conn.execute(
+            "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH ?", (unit,)
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
+
+
+@dataclass
+class Case:
+    query: str
+    source: str
+    gold: tuple[str, ...]  # any of these page-path substrings is a correct answer
+
+
+GOLD = [
+    Case("hook events list", "claude-code", ("en/hooks",)),
+    Case("what hook events exist", "claude-code", ("en/hooks",)),
+    Case("settings file precedence order", "claude-code", ("en/settings",)),
+    Case("how do I add a hook", "claude-code", ("en/hooks",)),
+    Case("restrict which tools a subagent can use", "claude-code", ("en/sub-agents",)),
+    Case("MCP server scopes local project user", "claude-code", ("en/mcp",)),
+    Case("--dangerously-skip-permissions", "claude-code", ("en/cli-reference",)),
+    Case("output styles", "claude-code", ("en/output-styles",)),
+    Case("slash command frontmatter", "claude-code", ("en/slash-commands",)),
+    Case("plugin marketplace", "claude-code", ("en/plugin",)),
+    # Two pages genuinely answer this: `sandboxing` explains the modes, and
+    # config-advanced has a section literally titled "Approval policies and
+    # sandbox modes". Scoring one of them as a miss would be scoring the gold
+    # set's opinion, not the retrieval.
+    Case("sandbox modes approval policy", "codex", ("sandboxing", "config-advanced")),
+    Case("AGENTS.md nesting precedence", "codex", ("agents-md",)),
+    Case("config.toml model provider", "codex", ("config",)),
+    Case("codex cloud environment setup", "codex", ("cloud",)),
+    Case("custom prompts slash commands", "codex", ("custom-prompts",)),
 ]
 
 
-STOP = {
-    "a", "an", "the", "how", "do", "does", "did", "i", "you", "to", "of", "in",
-    "on", "for", "is", "are", "was", "were", "be", "can", "could", "should",
-    "would", "what", "when", "where", "which", "with", "and", "or", "my", "me",
-    "it", "this", "that", "there", "then", "from", "by", "at", "as", "if",
-}
+def and_all(units: list[str], **_) -> list[str]:
+    return [" ".join(units), " OR ".join(units)]
 
 
-def units(raw: str, *, drop_stop: bool = False) -> list[str]:
-    """A word that yields >1 term was glued by -_./: => it's a symbol => phrase."""
-    out = []
-    for word in raw.split():
-        ts = TERM.findall(word)
-        if not ts:
-            continue
-        if drop_stop and len(ts) == 1 and ts[0].lower() in STOP:
-            continue
-        out.append('"%s"' % " ".join(ts))
-    return out or units(raw) if drop_stop else out
+def or_only(units: list[str], **_) -> list[str]:
+    return [" OR ".join(units)]
 
 
-def or_only(raw: str) -> list[str]:
-    u = units(raw)
-    return [" OR ".join(u)] if u else []
+def df_and(units: list[str], *, df, total, cutoff: float) -> list[str]:
+    counts = {u: df(u) for u in units}
+    keep = [u for u in units if 0 < counts[u] <= cutoff * total]
+    if not keep:
+        present = [u for u in units if counts[u]]
+        keep = [min(present, key=lambda u: counts[u])] if present else []
+    rungs = [" ".join(keep)] if keep else []
+    rungs += [" ".join(units), " OR ".join(units)]
+    return list(dict.fromkeys(rungs))
 
 
-def ladder(raw: str) -> list[str]:
-    u = units(raw)
-    if not u:
+def run(conn: sqlite3.Connection, expr: str, source: str, limit: int) -> list[str]:
+    sql = SEARCH_SQL.format(source_filter="AND c.source IN (?)", pool=POOL)
+    params = [*BM25_WEIGHTS, SNIPPET_TOKENS, expr, source, limit, limit]
+    try:
+        return [r["path"] for r in conn.execute(sql, params)]
+    except sqlite3.OperationalError:
         return []
-    rungs = [" ".join(u)]  # implicit AND
-    if len(u) > 1:
-        rungs.append(" OR ".join(u))
-    rungs.append(" OR ".join(x + "*" for x in u))
-    return rungs
 
 
-def stop_ladder(raw: str) -> list[str]:
-    """Drop filler words, then AND -> OR -> prefix-OR."""
-    u = units(raw, drop_stop=True)
-    if not u:
-        return []
-    rungs = [" ".join(u)]
-    if len(u) > 1:
-        rungs.append(" OR ".join(u))
-    rungs.append(" OR ".join(x + "*" for x in u))
-    return rungs
-
-
-SQL = """
-SELECT c.source, c.path, c.heading, -bm25(chunks_fts,10.0,5.0,1.0) AS s
-FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
-WHERE chunks_fts MATCH ? ORDER BY s DESC LIMIT 5
-"""
-
-
-def run(conn: sqlite3.Connection, rungs: list[str]) -> tuple[str, list]:
-    for expr in rungs:
-        try:
-            rows = conn.execute(SQL, (expr,)).fetchall()
-        except sqlite3.OperationalError as exc:
-            return f"ERROR {exc}", []
-        if rows:
-            return expr, rows
-    return "(no match)", []
+def evaluate(conn, name: str, strategy, **kw) -> tuple[int, int, list[str]]:
+    total = conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+    at1 = at3 = 0
+    misses = []
+    for case in GOLD:
+        units = query_units(case.query)
+        rungs = strategy(units, df=lambda u: doc_freq(conn, u), total=total, **kw)
+        paths: list[str] = []
+        for expr in rungs:
+            paths = run(conn, expr, case.source, 3)
+            if paths:
+                break
+        if paths and any(g in paths[0] for g in case.gold):
+            at1 += 1
+        if any(g in p for p in paths for g in case.gold):
+            at3 += 1
+        else:
+            misses.append(f"{case.query!r} -> {paths[0] if paths else '(none)'}")
+    return at1, at3, misses
 
 
 def main() -> int:
-    conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-    for q in QUERIES:
-        print(f"\n{'=' * 78}\nQ: {q!r}")
-        strategies = (("OR-only", or_only(q)), ("ladder", ladder(q)), ("stop+ladder", stop_ladder(q)))
-        for label, rungs in strategies:
-            expr, rows = run(conn, rungs)
-            print(f"  [{label:<8}] {expr}")
-            for src, path, heading, score in rows[:3]:
-                print(f"      {score:6.2f}  {src}/{path}  › {heading[:40]}")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    conn = connect(ensure_index(), read_only=True)
+    n = len(GOLD)
+    strategies = [
+        ("AND-first", and_all, {}),
+        ("OR-only", or_only, {}),
+        ("DF-AND 0.05", df_and, {"cutoff": 0.05}),
+        ("DF-AND 0.10", df_and, {"cutoff": 0.10}),
+        ("DF-AND 0.15", df_and, {"cutoff": 0.15}),
+        ("DF-AND 0.20", df_and, {"cutoff": 0.20}),
+        ("DF-AND 0.30", df_and, {"cutoff": 0.30}),
+    ]
+    print(f"{'strategy':<14}{'hit@1':>8}{'hit@3':>8}")
+    print("-" * 30)
+    results = []
+    for name, fn, kw in strategies:
+        at1, at3, misses = evaluate(conn, name, fn, **kw)
+        results.append((name, at1, at3, misses))
+        print(f"{name:<14}{at1}/{n:<6}{at3}/{n:>5}")
+
+    if args.verbose:
+        for name, _, _, misses in results:
+            if misses:
+                print(f"\n{name} misses:")
+                for m in misses:
+                    print(f"  {m}")
     return 0
 
 

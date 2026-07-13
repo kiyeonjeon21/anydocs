@@ -23,8 +23,8 @@ STOP = frozenset(
 )
 
 
-def compile_query(raw: str) -> list[str]:
-    """Compile user text into a ladder of FTS5 MATCH expressions, tried in order.
+def query_units(raw: str) -> list[str]:
+    """Split user text into quoted FTS5 units.
 
     Raw text is never interpolated: FTS5 reads `-`, `:`, `(`, `*` as operators,
     so `--dangerously-skip-permissions` or `Bash(git:*)` raise
@@ -39,15 +39,34 @@ def compile_query(raw: str) -> list[str]:
     kept = [ts for _, ts in words if ts and not (len(ts) == 1 and ts[0].lower() in STOP)]
     if not kept:  # a query made only of stopwords: keep them rather than match nothing
         kept = [ts for _, ts in words if ts]
-    if not kept:
-        return []
+    return ['"%s"' % " ".join(ts) for ts in kept]
 
-    units = ['"%s"' % " ".join(ts) for ts in kept]
-    ladder = [" ".join(units)]  # implicit AND — precision first
-    if len(units) > 1:
-        ladder.append(" OR ".join(units))
-    ladder.append(" OR ".join(f"{u}*" for u in units))  # prefix, for partial words
-    return ladder
+
+def compile_query(raw: str) -> list[str]:
+    """Compile user text into a ladder of MATCH expressions, tried in order.
+
+    OR, not AND. AND looks like the precise choice, and it is a trap: a word
+    like `list`, `file` or `order` sits in 10-18% of the corpus, so it
+    discriminates nothing — but inside an AND it still has the power to *veto*
+    the right answer. Asking for "hook events list" put a Python type reference
+    first, because the canonical `Hooks reference > Hook events` section never
+    happens to say "list". bm25's IDF already discounts those words to nearly
+    zero, so OR loses no precision worth having and stops them from excluding
+    anything. Scored on a 15-question gold set, OR beat AND-first and every
+    document-frequency-thresholded variant on both hit@1 and hit@3.
+
+    The static stopword list stays: grammatical filler (`how`, `do`, `a`) is
+    frequent enough that even under OR it drags in whole-corpus noise — it once
+    ranked an xAI FAQ ("How do I add other sign-in methods?") above the Claude
+    Code hooks guide.
+    """
+    units = query_units(raw)
+    if not units:
+        return []
+    return [
+        " OR ".join(units),
+        " OR ".join(f"{u}*" for u in units),  # prefix, for partial words
+    ]
 
 
 SEARCH_SQL = """

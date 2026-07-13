@@ -12,10 +12,12 @@ from anydocs.artifact import ensure_index
 from anydocs.index import connect
 from anydocs.query import clean_snippet, search
 
-# A page longer than this is summarised as an outline instead of returned whole.
-# The Claude Code hooks reference alone is 227 KB — dumping it would blow the
-# caller's context for no benefit.
+# Anything longer than this is summarised as an outline instead of returned whole.
+# The Claude Code hooks reference is 227 KB, and guarding only the page is not
+# enough: its `Hook events` section carries every event as a child heading and
+# comes to 121 KB on its own, which blew the caller's context just the same.
 BIG_PAGE = 40_000
+BIG_SECTION = 20_000
 
 # grep exists to be cheap and exact. Uncapped it would reproduce the very
 # token-burn failure this server was built to avoid. Scanning every page's body
@@ -132,16 +134,39 @@ def read_doc(path: str, source: str | None = None, section: str | None = None) -
         if part is None:
             heads = "\n".join(f"  - {h}" for h in headings(body))
             raise ValueError(f"no section {section!r} in {src}/{rel}. Sections:\n{heads}")
+        if len(part) > BIG_SECTION:
+            # Outline the children, not the section itself, and keep its own
+            # heading line so the caller still knows where they are.
+            own_heading, _, rest = part.partition("\n")
+            return f"{head}\n{own_heading}\n" + _outline(rest, "This section", lead_in=True)
         return f"{head}\n{part}"
 
     if len(body) > BIG_PAGE:
-        outline = "\n".join(f"  - {h}" for h in headings(body))
         return (
             f"{head}# {row['title']}\n\n{row['description']}\n\n"
-            f"This page is {len(body) // 1000} KB — too large to return whole.\n"
-            f"Re-call read_doc with section=<one of these>:\n\n{outline}"
+            + _outline(body, "This page")
         )
     return f"{head}\n{body}"
+
+
+def _outline(text: str, what: str, *, lead_in: bool = False) -> str:
+    """Describe an over-long chunk of markdown instead of returning it.
+
+    With `lead_in`, keep the prose before the first subheading: for a section
+    like `Hook events` that is the paragraph actually explaining the list, and
+    dropping it would leave the caller with nothing but names.
+    """
+    subs = headings(text)
+    out = ""
+    if lead_in:
+        first = HEADING_RE.search(text)
+        intro = (text[: first.start()] if first else text).strip()
+        out += f"\n{intro[:2000]}\n"
+    listing = "\n".join(f"  - {h}" for h in subs)
+    return (
+        f"{out}\n{what} is {len(text) // 1000} KB — too large to return whole.\n"
+        f"Re-call read_doc with section=<one of these>:\n\n{listing}"
+    )
 
 
 HEADING_RE = re.compile(r"^(#{2,3})\s+(.+?)\s*$", re.MULTILINE)
