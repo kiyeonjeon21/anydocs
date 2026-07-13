@@ -7,13 +7,16 @@ import pytest
 from anydocs.chunk import anchor_slug, chunk_page
 from anydocs.ingest.fetch import SoftNotFound, validate_markdown
 from anydocs.ingest.filters import extract_title
-from anydocs.models import Page, slug_path
+from anydocs.links import build_links
+from anydocs.models import Page, Source, slug_path
 from anydocs.index import SCHEMA
 from anydocs.query import (
     clean_snippet,
     compile_query,
     dropped_terms,
+    outlinks,
     query_units,
+    rescue_term,
     unmatched_terms,
 )
 
@@ -243,3 +246,107 @@ def test_chunker_builds_breadcrumbs():
     )
     crumbs = {c.heading: c.breadcrumb for c in chunk_page(page)}
     assert crumbs["PreToolUse"] == "Hooks reference › Hook events › PreToolUse"
+
+
+def _page(source, path, url, body, title="T"):
+    return Page(source=source, path=path, url=url, title=title, description="", body=body)
+
+
+def test_links_resolve_every_shape_the_sites_actually_use():
+    """The five sites write the same internal link four different ways, and a
+    resolver that handles only one of them silently produces an empty graph —
+    which is how Codex's 600 cross-references went missing.
+    """
+    src = Source(id="s", title="S", strategy="llms-txt", entry="e",
+                 link_bases=["https://alias.example.com/docs/"])
+    pages = [
+        _page("s", "en/hooks", "https://x.example.com/docs/en/hooks", ""),
+        _page("s", "en/sandboxing", "https://x.example.com/docs/en/sandboxing", ""),
+        _page("s", "guide", "https://x.example.com/docs/guide", ""),
+        _page("s", "start", "https://x.example.com/docs/start", body="\n".join([
+            "[a](https://x.example.com/docs/en/hooks)",   # absolute, canonical host
+            "[b](https://alias.example.com/docs/guide)",  # absolute, second host
+            "[c](/en/sandboxing#modes)",                  # site-absolute, docs-rooted
+            "[d](/docs/guide)",                           # site-absolute, host-rooted
+            "[e](https://github.com/o/r)",                # external
+            "[f](mailto:x@y.z)",
+        ])),
+    ]
+    rows = build_links(src, pages)
+    got = {to for _, frm, to, _, _ in rows if frm == "start"}
+    assert got == {"en/hooks", "guide", "en/sandboxing"}
+
+
+def test_links_ignore_code_samples_and_flag_see_also():
+    """A URL inside a fenced block is an example, not a cross-reference. And the
+    links an author files under "See also" are the ones they chose deliberately.
+    """
+    src = Source(id="s", title="S", strategy="llms-txt", entry="e")
+    body = "\n".join([
+        "# Permission modes",
+        "```bash",
+        "curl [x](/en/decoy)",
+        "```",
+        "Prose mentions [settings](/en/settings).",
+        "## See also",
+        "* [Sandboxing](/en/sandboxing): filesystem and network isolation",
+    ])
+    pages = [
+        _page("s", "en/decoy", "https://x.example.com/docs/en/decoy", ""),
+        _page("s", "en/settings", "https://x.example.com/docs/en/settings", ""),
+        _page("s", "en/sandboxing", "https://x.example.com/docs/en/sandboxing", ""),
+        _page("s", "en/permission-modes", "https://x.example.com/docs/en/permission-modes", body),
+    ]
+    graph = {to: seealso for _, frm, to, seealso, _ in build_links(src, pages)
+             if frm == "en/permission-modes"}
+    assert "en/decoy" not in graph  # fenced
+    assert graph == {"en/settings": 0, "en/sandboxing": 1}
+
+
+def test_rescue_names_the_page_a_missed_word_actually_lives_on():
+    """The failure this exists for: asked `headless -p allowedTools sandbox flag`,
+    OR matching ranked the headless pages and `sandbox` reached none of them —
+    while `en/sandboxing` sat in the index. Saying "no result contains sandbox"
+    was not enough; the caller answered anyway, and answered wrong. Name the page.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.executemany(
+        "INSERT INTO chunks(source,path,anchor,breadcrumb,title,heading,body) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("cc", "en/headless", "", "b", "Headless", "Usage", "run headless with allowedTools"),
+            ("cc", "en/sandboxing", "", "b", "Sandboxing", "Modes", "the sandbox isolates bash"),
+            ("other", "s", "", "b", "Other", "H", "a sandbox lives here too"),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO chunks_fts(rowid,title,heading,body) SELECT id,title,heading,body FROM chunks"
+    )
+    pages, total = rescue_term(conn, "sandbox", ["cc"], limit=3)
+    assert pages == ["cc/en/sandboxing"]  # scoped: the other source is not offered
+    assert total == 1
+    assert rescue_term(conn, "kubernetes", ["cc"], limit=3) == ([], 0)
+
+
+def test_outlinks_put_see_also_first():
+    """A "See also" link is a deliberate pointer; one in the prose is incidental.
+    Within a group, keep the order the author wrote them — the only ordering here
+    that is not our guess.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.executemany(
+        "INSERT INTO pages VALUES (?,?,?,?,?,?)",
+        [("s", p, "u", p, "", "") for p in ("from", "prose-a", "prose-b", "seealso")],
+    )
+    conn.executemany(
+        "INSERT INTO links VALUES (?,?,?,?,?)",
+        [("s", "from", "prose-a", 0, 0), ("s", "from", "prose-b", 0, 1),
+         ("s", "from", "seealso", 1, 2)],
+    )
+    assert [r["path"] for r in outlinks(conn, "s", "from", limit=8)] == [
+        "seealso", "prose-a", "prose-b",
+    ]
+    assert [r["path"] for r in outlinks(conn, "s", "from", limit=2)] == ["seealso", "prose-a"]

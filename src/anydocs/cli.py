@@ -57,6 +57,18 @@ async def run_build(sources_dir: Path, out: Path) -> int:
         return 1
 
     stats = build(out / DB_NAME, ingested, synced_at)
+
+    # A source whose cross-references all fail to resolve still indexes, searches
+    # and looks entirely healthy — Codex's did exactly that, because its bodies
+    # link to a second host and nothing checked. Say so.
+    for sid, stat in stats.items():
+        if not stat["links"]:
+            failures.append(
+                f"{sid}: no internal links resolved — its cross-reference graph is "
+                f"empty. If the site links to itself under another host, add it to "
+                f"link_bases in sources/{sid}.yaml."
+            )
+
     manifest = {
         "synced_at": synced_at,
         # Hash of the docs themselves, not of the artifact: the .tar.zst differs
@@ -81,7 +93,7 @@ async def run_build(sources_dir: Path, out: Path) -> int:
 # to chunking, titles or slugs republishes — hashing only the page bodies did
 # not, so a fix to how the docs are indexed could sit undelivered forever while
 # CI cheerfully reported "documentation unchanged".
-INDEXER_MODULES = ["chunk.py", "index.py", "models.py", "ingest/filters.py"]
+INDEXER_MODULES = ["chunk.py", "index.py", "links.py", "models.py", "ingest/filters.py"]
 
 
 def content_hash(ingested: list[tuple[Source, list[Page]]]) -> str:

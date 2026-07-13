@@ -14,3 +14,8 @@ exclude:
   - "*/codex-manual.md"
 # The live site does not collapse dash runs (Privacy & data -> privacy--data).
 slug_style: verbatim
+# ...and the bodies cross-reference each other under that same second host, so
+# the link graph needs to know it is an alias for base_url. Without this line
+# Codex's 600 internal links all look external and it has no graph at all.
+link_bases:
+  - https://learn.chatgpt.com/docs/

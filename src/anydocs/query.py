@@ -190,6 +190,84 @@ def unmatched_terms(
     return missing
 
 
+OUTLINKS_SQL = """
+SELECT l.to_path AS path, p.title, p.description, l.in_seealso
+FROM links l
+JOIN pages p ON p.source = l.source AND p.path = l.to_path
+WHERE l.source = ? AND l.from_path = ?
+ORDER BY l.in_seealso DESC, l.ord
+LIMIT ?
+"""
+
+
+def outlinks(conn: sqlite3.Connection, source: str, path: str, limit: int) -> list[sqlite3.Row]:
+    """The pages this page points at — the docs' own cross-references (links.py).
+
+    "See also" first: those are the links an author filed under an explicit
+    read-this-next heading, as opposed to the ones that merely happen to appear
+    in the prose. Within each group, the order the author wrote them, which is
+    the only ordering here that is not a guess of ours.
+    """
+    return conn.execute(OUTLINKS_SQL, (source, path, limit)).fetchall()
+
+
+RESCUE_SQL = """
+SELECT c.source, c.path, -bm25(chunks_fts, ?, ?, ?) AS score
+FROM chunks_fts
+JOIN chunks c ON c.id = chunks_fts.rowid
+WHERE chunks_fts MATCH ?
+  {source_filter}
+ORDER BY score DESC
+LIMIT {pool}
+"""
+
+RESCUE_COUNT_SQL = """
+SELECT COUNT(*) FROM (
+  SELECT DISTINCT c.source, c.path
+  FROM chunks_fts
+  JOIN chunks c ON c.id = chunks_fts.rowid
+  WHERE chunks_fts MATCH ?
+    {source_filter}
+)
+"""
+
+
+def rescue_term(
+    conn: sqlite3.Connection, term: str, sources: list[str] | None, limit: int
+) -> tuple[list[str], int]:
+    """Where a word that missed the results actually lives. Returns (pages, total).
+
+    Matching is OR, so one distinctive word can be outvoted by the common ones
+    beside it and never reach the results at all. That is not hypothetical: asked
+    for `headless -p allowedTools disallowedTools sandbox flag`, the ranker
+    handed back the headless and CLI pages, `sandbox` matched nothing in any of
+    them — and `en/sandboxing` sat in the index, unmentioned. The caller went on
+    to report that Claude Code has no sandbox.
+
+    Saying "no result contains sandbox" was not enough; the caller ignored it.
+    Run the word on its own and name the pages that do contain it. The total
+    matters too: a word in 14 pages is a topic that was missed, a word in 2 is a
+    passing mention, and the caller cannot tell those apart from a list alone.
+    """
+    filt = f"AND c.source IN ({','.join('?' * len(sources))})" if sources else ""
+    unit = f'"{term}"'
+    params = [unit, *(sources or [])]
+    try:
+        rows = conn.execute(
+            RESCUE_SQL.format(source_filter=filt, pool=POOL),
+            [*BM25_WEIGHTS, *params],
+        ).fetchall()
+        # Counted separately, and exactly: the ranked query above stops at POOL
+        # chunks, so the pages it happens to reach are a floor, not the total.
+        total = conn.execute(
+            RESCUE_COUNT_SQL.format(source_filter=filt), params
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        return [], 0
+    pages = list(dict.fromkeys(f"{r['source']}/{r['path']}" for r in rows))
+    return pages[:limit], total
+
+
 def search(
     conn: sqlite3.Connection,
     query: str,

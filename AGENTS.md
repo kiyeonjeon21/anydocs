@@ -23,8 +23,20 @@ these shipped, and each read to the caller as "the docs don't cover this":
 - OR matching → always finds *something*, off the query's least interesting words
 
 So: **never return an empty or weak result without saying why.** `search_docs`
-now names the words that never reached the results, refuses unknown sources, and
-warns on dropped non-English terms. Hold new code to the same rule.
+refuses unknown sources and warns on dropped non-English terms. Hold new code to
+the same rule.
+
+And a warning is not a fix. Asked `headless -p allowedTools disallowedTools
+sandbox flag`, OR matching ranked the headless and CLI pages, `sandbox` reached
+none of them, and `en/sandboxing` sat in the index unmentioned. `search_docs`
+*said* "no result contains sandbox" — and the caller answered anyway, reporting
+that Claude Code has no sandbox. It has one: Seatbelt on macOS, bubblewrap on
+Linux.
+
+**A caller will act on a name and ignore an adjective.** So `search_docs` now
+re-runs the missed word on its own and names the pages it is really on
+(`query.rescue_term`), and `read_doc` ends with the page's own cross-references
+(`query.outlinks`). If you add a new way to fail, make it point somewhere.
 
 ## Do not retry these — they were measured and rejected
 
@@ -39,6 +51,9 @@ Re-deriving them costs a day each.
 | Demoting link-heavy "pointer" chunks | The *correct* chunk had 39% link density; the pointer had 35%. The signal does not separate them. |
 | Smaller `MAX_CHUNK` | Fixes "settings file precedence order" and breaks "hook events list" and "config.toml model provider". A trade, not a win. |
 | Stripping link URLs from the *indexed* body | Ranking flat, slightly worse at 4000. It is stripped at *display* time only. |
+| A "Related pages" list on `search_docs`, from the link graph | ~200 tokens on *every* search — 40% of the budget — and on the query that actually failed it returned `common-workflows`, `agent-sdk/overview`. It did not surface `en/sandboxing`. Cut. The same graph pays for itself in `read_doc`, where the response is already kilobytes. |
+| Re-ranking the link neighbourhood by BM25 | The premise of the miss was that the *query* was aimed wrong. Scoring the neighbours with the same scorer reproduces the same blindness — of course it does. |
+| Ranking neighbours by IDF-lift co-citation | Over-corrects. `refs=1, inbound=2` obscurities (`deep-links`, `agent-sdk/streaming-output`) beat the right page. Popularity (`refs`) picks hubs, rarity picks noise, and nothing in between separated them. |
 
 ## Retrieval changes need evidence
 
@@ -84,8 +99,19 @@ HTTP 200 for every unknown path, so bodies are content-checked, not trusted.
   (~25–90 ms for the whole corpus) — ripgrep was dropped because it is not
   reliably installed.
 - The client compares the published `content_hash` (manifest.json, ~400 bytes)
-  against its cache, throttled to once per 6 h. Without this the daily sync
-  reaches nobody: the release tag is fixed, so the cache path never changes.
+  against its cache, throttled to once per hour (`ANYDOCS_REFRESH=1` skips it).
+  Without this the daily sync reaches nobody: the release tag is fixed, so the
+  cache path never changes.
+- `content_hash` covers `cli.INDEXER_MODULES` as well as the page bodies. **A new
+  module that shapes the index must be added to that list** — otherwise the docs
+  are unchanged, the hash is unchanged, CI reports "documentation unchanged", and
+  your fix is never published.
+- The `links` table is the docs' own cross-references, resolved at index time
+  (`links.py`). Sites write internal links four different ways and disagree about
+  what a leading `/` means, so resolution offers every reading and keeps whichever
+  lands on a page that exists. A site that links to itself under a second host
+  needs `link_bases` in its YAML — without it Codex's 600 internal links all read
+  as external and its graph vanished silently.
 - Source names are injected into the tool schemas at startup (`enum` +
   description), so the model never has to guess `claude-code` from `claude`.
 

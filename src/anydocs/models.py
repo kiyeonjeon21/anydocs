@@ -24,6 +24,12 @@ class Source:
     # How the live site slugs its heading anchors. See chunk.anchor_slug — the
     # sites genuinely differ, and a wrong slug is a link that silently misses.
     slug_style: str = "collapse"
+    # Extra URL prefixes that also address this source's pages. Only needed when
+    # a site links to itself under a second host: Codex's bodies cross-reference
+    # learn.chatgpt.com/docs/ while the pages themselves live on
+    # developers.openai.com/codex/, so without this every one of its internal
+    # links reads as external and its whole cross-reference graph disappears.
+    link_bases: list[str] = field(default_factory=list)
 
     @classmethod
     def load_all(cls, directory: Path) -> list[Source]:

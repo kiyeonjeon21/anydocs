@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from anydocs.chunk import chunk_page
+from anydocs.links import build_links
 from anydocs.models import Page, Source
 
 SCHEMA_VERSION = "1"
@@ -26,6 +27,14 @@ CREATE TABLE chunks(
   breadcrumb TEXT, title TEXT, heading TEXT, body TEXT);
 
 CREATE INDEX chunks_source ON chunks(source);
+
+-- The cross-references the docs authors wrote by hand. See links.py: a human who
+-- knows the corpus decided these pages belong together, and that is a pointer to
+-- the page you did not know to ask for — which is exactly what a keyword index
+-- cannot produce.
+CREATE TABLE links(
+  source TEXT, from_path TEXT, to_path TEXT, in_seealso INTEGER, ord INTEGER,
+  PRIMARY KEY(source, from_path, to_path));
 
 -- External-content FTS: the index points back at `chunks` instead of storing a
 -- second copy of every body. unicode61, not porter: stemming mangles the exact
@@ -77,7 +86,9 @@ def build(db_path: Path, ingested: Iterable[tuple[Source, list[Page]]], synced_a
                 for c in chunks
             ],
         )
-        stats[source.id] = {"pages": len(pages), "chunks": len(chunks)}
+        links = build_links(source, pages)
+        conn.executemany("INSERT OR IGNORE INTO links VALUES (?,?,?,?,?)", links)
+        stats[source.id] = {"pages": len(pages), "chunks": len(chunks), "links": len(links)}
 
     conn.execute(
         "INSERT INTO chunks_fts(rowid, title, heading, body) "

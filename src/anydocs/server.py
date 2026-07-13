@@ -11,7 +11,14 @@ from mcp.server.fastmcp import FastMCP
 from anydocs.artifact import ensure_index
 from anydocs.index import connect
 from anydocs.chunk import iter_headings
-from anydocs.query import clean_snippet, dropped_terms, search, unmatched_terms
+from anydocs.query import (
+    clean_snippet,
+    dropped_terms,
+    outlinks,
+    rescue_term,
+    search,
+    unmatched_terms,
+)
 
 # Anything longer than this is summarised as an outline instead of returned whole.
 # The Claude Code hooks reference is 227 KB, and guarding only the page is not
@@ -19,6 +26,13 @@ from anydocs.query import clean_snippet, dropped_terms, search, unmatched_terms
 # comes to 121 KB on its own, which blew the caller's context just the same.
 BIG_PAGE = 40_000
 BIG_SECTION = 20_000
+
+# Pages to name per rescued term, and cross-references to list under a page.
+# read_doc is already returning a whole page, so a few lines of footer are free;
+# the cap matters anyway, because Claude Code's settings page links to 51 others.
+RESCUE_MAX = 3
+OUTLINK_MAX = 8
+OUTLINK_DESC = 90
 
 # grep exists to be cheap and exact. Uncapped it would reproduce the very
 # token-burn failure this server was built to avoid. Scanning every page's body
@@ -136,6 +150,11 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     Use this first for any question about a documented tool. Follow up with
     read_doc on the paths it returns.
 
+    **If a NOTE says one of your words missed, believe it.** Matching is OR, so a
+    distinctive word can be outvoted by the common ones next to it — the note
+    names the pages that word really lives on. Read one before you conclude the
+    feature does not exist.
+
     **Pass `source` whenever the question names one product.** These doc sets
     cover the same ground in different words, so an unfiltered search spends
     slots on the wrong products: a question about Claude Code hooks will also
@@ -175,17 +194,7 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
             f"so these results answer only {expr}. Re-search in English.",
             "",
         ]
-    if missed := unmatched_terms(db(), query, rows):
-        # Matching is OR, so a query always finds *something* — usually off its
-        # least interesting words. Say which words never reached the results, or
-        # a question about `cursorrules` reads as answered by the pages that
-        # merely happened to contain `tab`.
-        lines += [
-            f"NOTE: no result below contains {', '.join(missed)}. They matched on "
-            f"the other words only — so if {missed[0]!r} is the point of the "
-            f"question, these are not the answer (try grep_docs, or check the spelling).",
-            "",
-        ]
+    lines += rescue_block(query, rows, scope)
     lines += [f"{len(rows)} results (matched: {expr})", ""]
     for r in rows:
         anchor = f"#{r['anchor']}" if r["anchor"] else ""
@@ -196,6 +205,43 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
+def rescue_block(query: str, rows: list[sqlite3.Row], scope: list[str] | None) -> list[str]:
+    """For each query word that reached none of the results, say where it does live.
+
+    Matching is OR, so a search always returns *something* — and what it returns
+    is ranked on whichever words were common enough to win. A distinctive word
+    can be outvoted and vanish. Asked for
+    `headless -p allowedTools disallowedTools sandbox flag`, the ranker returned
+    the headless and CLI pages, not one of which said `sandbox`, while
+    `en/sandboxing` sat in the index. The caller read the results and reported
+    that Claude Code has no sandbox. It has one.
+
+    An earlier version of this said only "no result contains sandbox" and left
+    the caller to act on it. It did not. So do the search the caller should have
+    done: run the missed word alone and name the pages it is actually on. The
+    page count separates the two cases that look identical from a list — a word
+    on 14 pages is a topic that got buried, a word on 2 is a passing mention.
+    """
+    out: list[str] = []
+    for term in unmatched_terms(db(), query, rows):
+        pages, total = rescue_term(db(), term, scope, limit=RESCUE_MAX)
+        if not pages:
+            out.append(
+                f"NOTE: {term!r} does not appear anywhere in the indexed docs, and no "
+                f"result below contains it. Check the spelling, or the docs may not "
+                f"cover it."
+            )
+            continue
+        where = f"{total} indexed pages do" if total > 1 else "one indexed page does"
+        out.append(
+            f"NOTE: no result below contains {term!r} — it was outvoted by the more "
+            f"common words in the query. But {where}, best first: "
+            f"{', '.join(pages)}. If {term!r} is the point of the question, read one "
+            f"of those before you answer; the results below are not about it."
+        )
+    return [*out, ""] if out else []
+
+
 @mcp.tool()
 def read_doc(path: str, source: str | None = None, section: str | None = None) -> str:
     """Read a documentation page, or one section of it.
@@ -203,6 +249,10 @@ def read_doc(path: str, source: str | None = None, section: str | None = None) -
     `path` is what search_docs returns, e.g. "claude-code/en/hooks". Pass
     `section` (a heading or its anchor) to read just that part — required for
     very large pages, which otherwise return an outline to choose from.
+
+    The **Related pages** footer is the page's own outgoing cross-references —
+    what its authors thought you should read next. Follow them when the question
+    spans more than the one page you happened to land on.
     """
     src, rel = resolve(path, source)
     row = db().execute(
@@ -215,6 +265,8 @@ def read_doc(path: str, source: str | None = None, section: str | None = None) -
     head = f"<!-- {src}/{rel} — {row['url']} -->\n"
     body = row["body"]
 
+    foot = outlink_footer(src, rel)
+
     if section:
         part = extract_section(body, section)
         if part is None:
@@ -224,15 +276,42 @@ def read_doc(path: str, source: str | None = None, section: str | None = None) -
             # Outline the children, not the section itself, and keep its own
             # heading line so the caller still knows where they are.
             own_heading, _, rest = part.partition("\n")
-            return f"{head}\n{own_heading}\n" + _outline(rest, "This section", lead_in=True)
-        return f"{head}\n{part}"
+            part = f"{own_heading}\n" + _outline(rest, "This section", lead_in=True)
+        return f"{head}\n{part}\n{foot}"
 
     if len(body) > BIG_PAGE:
-        return (
-            f"{head}# {row['title']}\n\n{row['description']}\n\n"
+        body = (
+            f"# {row['title']}\n\n{row['description']}\n\n"
             + _outline(body, "This page")
         )
-    return f"{head}\n{body}"
+    return f"{head}\n{body}\n{foot}"
+
+
+def outlink_footer(src: str, rel: str) -> str:
+    """The page's own cross-references, named at the end where they can be acted on.
+
+    These are already in the body — and being in the body is not enough. The
+    model that concluded Claude Code has no sandbox had *read*
+    `en/permission-modes`, whose "See also" links straight to `en/sandboxing`; it
+    was one bullet in fifteen kilobytes of markdown and went by unread. The same
+    fact, as a short labelled list at the end of the response, is something a
+    caller can act on.
+
+    Always the whole page's links, even when only a section was asked for: a
+    "See also" block sits at the *foot* of a page, so scoping this to the section
+    would hide it from exactly the caller who read straight to the part they were
+    pointed at.
+    """
+    rows = outlinks(db(), src, rel, limit=OUTLINK_MAX)
+    if not rows:
+        return ""
+    out = ["", "Related pages (cross-referenced by this one):"]
+    for r in rows:
+        desc = " ".join((r["description"] or r["title"] or "").split())
+        if len(desc) > OUTLINK_DESC:
+            desc = desc[:OUTLINK_DESC].rsplit(" ", 1)[0] + "…"
+        out.append(f"  {src}/{r['path']}" + (f" — {desc}" if desc else ""))
+    return "\n".join(out)
 
 
 def _outline(text: str, what: str, *, lead_in: bool = False) -> str:
