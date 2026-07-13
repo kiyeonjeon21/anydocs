@@ -330,12 +330,32 @@ def list_pages(source: str, prefix: str = "") -> str:
     )
 
 
+def check_scope() -> None:
+    """Fail loudly on a bad ANYDOCS_SOURCES rather than serving an empty index.
+
+    A typo here used to disable the whole server without saying anything:
+    every source got filtered away, so list_sources answered "index is empty"
+    and every search answered "no matches" — which the caller reads as "the docs
+    do not cover this" rather than "your config is wrong".
+    """
+    scope = enabled_sources()
+    if not scope:
+        return
+    known = [r["id"] for r in db().execute("SELECT id FROM sources ORDER BY id")]
+    if unknown := [s for s in scope if s not in known]:
+        raise ValueError(
+            f"ANYDOCS_SOURCES names unknown sources: {', '.join(unknown)}. "
+            f"Available: {', '.join(known)}"
+        )
+
+
 def main() -> int:
     try:
         ensure_index()
+        check_scope()
         annotate_source_params()
     except Exception as exc:  # noqa: BLE001
-        print(f"anydocs: cannot open index: {exc}", file=sys.stderr)
+        print(f"anydocs: {exc}", file=sys.stderr)
         return 1
     mcp.run()
     return 0

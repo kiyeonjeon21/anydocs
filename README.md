@@ -29,3 +29,21 @@ Drop a YAML file in `sources/`. Three ingest strategies cover the sites seen so 
     "command": "uvx",
     "args": ["--from", "git+https://github.com/kiyeonjeon21/anydocs", "anydocs"] }}}
 ```
+
+## Scoping a project to the docs it uses
+
+`ANYDOCS_SOURCES` limits the server to the sources you name. The rest become
+invisible: they are dropped from `list_sources`, from the `source` enum the model
+sees, and from every search. Worth doing — these doc sets cover the same ground
+in different words, so on a Claude Code repo an unfiltered search for
+"hook events" gives 3 of its 5 slots to Cursor and xAI.
+
+```jsonc
+{ "mcpServers": { "anydocs": {
+    "command": "uvx",
+    "args": ["--from", "git+https://github.com/kiyeonjeon21/anydocs", "anydocs"],
+    "env": { "ANYDOCS_SOURCES": "claude-code,codex" } }}}
+```
+
+A name that isn't in the index stops the server with the list of valid ones,
+rather than quietly serving an empty index.
