@@ -1,16 +1,8 @@
 {
   "mcpServers": {
-    "wxo-docs": {
-        "type": "http",
-        "url": "https://developer.watson-orchestrate.ibm.com/mcp"
-    },
     "anydocs": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/kiyeonjeon21/anydocs",
-        "anydocs"
-      ]
+      "command": "uv",
+      "args": ["run", "--directory", ".", "anydocs"]
     }
   }
 }
