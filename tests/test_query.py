@@ -7,7 +7,14 @@ import pytest
 from anydocs.chunk import anchor_slug, chunk_page
 from anydocs.ingest.fetch import SoftNotFound, validate_markdown
 from anydocs.models import Page
-from anydocs.query import clean_snippet, compile_query, dropped_terms, query_units
+from anydocs.index import SCHEMA
+from anydocs.query import (
+    absent_terms,
+    clean_snippet,
+    compile_query,
+    dropped_terms,
+    query_units,
+)
 
 
 class FakeResponse:
@@ -127,6 +134,27 @@ def test_clean_snippet_replaces_a_table_header_with_the_description():
 )
 def test_dropped_terms_flags_unsearchable_words(query, expected):
     assert dropped_terms(query) == expected
+
+
+def test_absent_terms_names_words_the_corpus_never_uses():
+    """OR matching always finds *something*: a TensorFlow question returns
+    confident-looking hits off `model` and `loop` alone. Naming the absent word
+    is what turns that into "these docs don't discuss TensorFlow"."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    conn.execute(
+        "INSERT INTO chunks(source,path,anchor,breadcrumb,title,heading,body) "
+        "VALUES ('s','p','','b','Hooks','Hook events','the model runs a hook loop')"
+    )
+    conn.execute(
+        "INSERT INTO chunks_fts(rowid,title,heading,body) "
+        "SELECT id,title,heading,body FROM chunks"
+    )
+
+    assert absent_terms(conn, "tensorflow model loop") == ["tensorflow"]
+    assert absent_terms(conn, "model hook") == []
+    assert absent_terms(conn, "hok modle") == ["hok", "modle"]  # typos surface too
 
 
 def test_unknown_source_is_refused_not_silently_empty(monkeypatch):

@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from anydocs.artifact import ensure_index
 from anydocs.index import connect
-from anydocs.query import clean_snippet, dropped_terms, search
+from anydocs.query import absent_terms, clean_snippet, dropped_terms, search
 
 # Anything longer than this is summarised as an outline instead of returned whole.
 # The Claude Code hooks reference is 227 KB, and guarding only the page is not
@@ -170,6 +170,15 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
         lines += [
             f"WARNING: {', '.join(dropped)} was ignored (the index is English-only), "
             f"so these results answer only {expr}. Re-search in English.",
+            "",
+        ]
+    if absent := absent_terms(db(), query, scope):
+        # Matching is OR, so a query always finds *something*. Say which word
+        # found nothing, or "tensorflow model training loop" reads as if these
+        # docs discussed TensorFlow.
+        lines += [
+            f"NOTE: {', '.join(absent)} appears nowhere in these docs — the hits "
+            f"below match only the other words (or it is a typo).",
             "",
         ]
     lines += [f"{len(rows)} results (matched: {expr})", ""]

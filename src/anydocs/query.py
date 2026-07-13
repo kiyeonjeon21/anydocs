@@ -154,6 +154,35 @@ def clean_snippet(snip: str, fallback: str = "") -> str:
     return text
 
 
+def absent_terms(
+    conn: sqlite3.Connection, query: str, sources: list[str] | None = None
+) -> list[str]:
+    """Query words that appear in no chunk at all.
+
+    OR matching always finds something: asking about TensorFlow returns three
+    confident-looking hits, because `model` and `loop` are everywhere in these
+    docs. The scores are lower, but nothing tells the caller what "lower" means.
+    Naming the word that is simply absent does — it turns a puzzling weak result
+    into "the docs do not mention TensorFlow", and catches typos for free.
+    """
+    sql = "SELECT 1 FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid WHERE chunks_fts MATCH ?"
+    params: list = []
+    if sources:
+        sql += f" AND c.source IN ({','.join('?' * len(sources))})"
+        params = list(sources)
+    sql += " LIMIT 1"
+
+    missing = []
+    for unit in query_units(query):
+        try:
+            hit = conn.execute(sql, [unit, *params]).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        if not hit:
+            missing.append(unit.strip('"'))
+    return missing
+
+
 def search(
     conn: sqlite3.Connection,
     query: str,
