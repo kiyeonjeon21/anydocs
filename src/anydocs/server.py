@@ -145,9 +145,11 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     so a question in another language finds nothing — translate it to English
     keywords first ("훅 이벤트 목록" -> "hook events list").
 
-    Keyword-style queries work best; filler words are dropped. Exact symbols like
-    `PreToolUse` or `--flag-name` search fine here, but there is no fuzzy
-    matching, so a typo finds nothing and a literal regex is a job for grep_docs.
+    Keyword-style queries work best and filler words are dropped. Symbols are
+    fine here — `AGENTS.md`, `PreToolUse`, `--flag-name`, `spec_version` all
+    match, because punctuation is treated as a word boundary rather than
+    dropped. Do not reach for grep_docs just because the query contains one.
+    There is no fuzzy matching, so a typo finds nothing.
     """
     scope = scope_for(source)
     rows, expr = search(db(), query, sources=scope, limit=limit)
@@ -280,12 +282,18 @@ def extract_section(body: str, wanted: str) -> str | None:
 
 @mcp.tool()
 def grep_docs(pattern: str, source: str | None = None, ignore_case: bool = True) -> str:
-    """Regex search over the raw documentation markdown.
+    """Regex search over the raw documentation markdown. **Use search_docs first.**
 
-    The escape hatch for what BM25 cannot match: exact flags, config keys, code
-    identifiers. `pattern` is a Python regex. Pass `source` when the question is
-    about one product — matches are capped, so an unscoped grep can fill its
-    budget with the wrong doc set.
+    This is the last resort, not the first move. It returns raw matching lines,
+    so it costs several times what a search costs and gives you no ranking — an
+    unscoped grep for a common term burns ~1.5k tokens and still hits its cap.
+
+    Symbols are NOT a reason to come here: `AGENTS.md`, `PreToolUse` and
+    `--flag-name` all match in search_docs. Come here only when search_docs
+    missed, or when you need *every* occurrence of a literal — an env var, a
+    config key, a flag — rather than the best passages about it.
+
+    `pattern` is a Python regex. Pass `source` unless you truly want all of them.
     """
     try:
         rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
