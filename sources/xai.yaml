@@ -1,0 +1,13 @@
+id: xai
+title: xAI / Grok
+tags: [llm-api, xai]
+# xai's llms.txt is not an index — it is the whole corpus in one file, with
+# pages delimited by lines like "===/build/cli/reference===". There are no .md
+# twins (they 404), so the llms.txt itself is the body.
+strategy: llms-full
+entry: https://docs.x.ai/llms.txt
+delimiter: '^===(?P<path>/.*?)===$'
+url_template: https://docs.x.ai{path}
+expect_pages: 143
+# The live site does not collapse dash runs (Privacy & data -> privacy--data).
+slug_style: verbatim

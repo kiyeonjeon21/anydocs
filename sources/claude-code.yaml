@@ -1,0 +1,8 @@
+id: claude-code
+title: Claude Code
+tags: [coding-agent, anthropic]
+strategy: llms-txt
+entry: https://code.claude.com/docs/llms.txt
+base_url: https://code.claude.com/docs/
+# llms.txt already links the .md twins directly, and lists only English pages.
+expect_pages: 165

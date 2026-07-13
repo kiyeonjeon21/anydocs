@@ -1,0 +1,16 @@
+id: codex
+title: OpenAI Codex
+tags: [coding-agent, openai]
+strategy: llms-txt
+entry: https://learn.chatgpt.com/llms.txt
+# The llms.txt is served from learn.chatgpt.com but every page link points at
+# developers.openai.com. The .md twins on learn.chatgpt.com are component stubs
+# ("<CodexCliLanding />"), so we must follow the cross-host links.
+base_url: https://developers.openai.com/codex/
+# The index opens with a "Documentation sets" group linking to whole-corpus
+# exports rather than pages; those would be indexed as one giant duplicate page.
+exclude:
+  - "*/llms-full.txt"
+  - "*/codex-manual.md"
+# The live site does not collapse dash runs (Privacy & data -> privacy--data).
+slug_style: verbatim

@@ -1,0 +1,76 @@
+name: sync docs index
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "sources/**"
+      - "src/anydocs/ingest/**"
+      - "src/anydocs/chunk.py"
+      - "src/anydocs/index.py"
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: index-latest
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build index
+        run: uv run anydocs-build
+
+      - name: Compare against the published index
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          new_hash=$(jq -r .content_hash build/manifest.json)
+          old_hash=""
+          if gh release download "$RELEASE_TAG" --pattern manifest.json --dir prev 2>/dev/null; then
+            old_hash=$(jq -r .content_hash prev/manifest.json)
+          fi
+          echo "new=$new_hash old=$old_hash"
+          if [ "$new_hash" = "$old_hash" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Documentation unchanged; skipping release."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Surface ingest warnings
+        run: |
+          jq -r '.warnings[]?' build/manifest.json | while read -r w; do
+            echo "::warning title=ingest::$w"
+          done
+          # A source that vanished entirely is a site redesign, not a blip.
+          jq -e '.sources | length >= 1' build/manifest.json > /dev/null
+
+      - name: Verify anchors against the live sites
+        # A wrong heading slug is a link that quietly lands on the wrong place;
+        # nothing else in the pipeline would ever notice, so check it here.
+        run: uv run python scripts/verify_anchors.py
+
+      - name: Publish
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(jq -r '"Synced \(.synced_at)\n\n" + (.sources | to_entries
+                    | map("- \(.key): \(.value.pages) pages, \(.value.chunks) chunks")
+                    | join("\n"))' build/manifest.json)
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$RELEASE_TAG" \
+            --title "Docs index" \
+            --notes "$notes" \
+            build/anydocs-index.tar.zst build/manifest.json

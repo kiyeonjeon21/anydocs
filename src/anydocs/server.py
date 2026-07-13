@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import sys
+
+from mcp.server.fastmcp import FastMCP
+
+from anydocs.artifact import ensure_index
+from anydocs.index import connect
+from anydocs.query import clean_snippet, search
+
+# A page longer than this is summarised as an outline instead of returned whole.
+# The Claude Code hooks reference alone is 227 KB — dumping it would blow the
+# caller's context for no benefit.
+BIG_PAGE = 40_000
+
+# grep exists to be cheap and exact. Uncapped it would reproduce the very
+# token-burn failure this server was built to avoid. Scanning every page's body
+# with Python's re takes ~25-90 ms over the whole corpus, so there is no reason
+# to shell out to ripgrep — which is not reliably installed anyway.
+GREP_MAX_MATCHES = 40
+GREP_PER_PAGE = 3
+GREP_MAX_COLS = 200
+
+mcp = FastMCP("anydocs")
+
+_conn: sqlite3.Connection | None = None
+_enabled: list[str] = []
+
+
+def db() -> sqlite3.Connection:
+    global _conn
+    if _conn is None:
+        _conn = connect(ensure_index(), read_only=True)
+    return _conn
+
+
+def enabled_sources() -> list[str]:
+    """ANYDOCS_SOURCES scopes a project to the docs it actually uses, so an
+    unrelated corpus can't pollute its results."""
+    raw = os.environ.get("ANYDOCS_SOURCES", "").strip()
+    return [s.strip() for s in raw.split(",") if s.strip()] if raw else []
+
+
+def resolve(path: str, source: str | None) -> tuple[str, str]:
+    """Accept either ("claude-code/en/hooks", None) or ("en/hooks", "claude-code").
+
+    Paths are source-qualified because bare ones collide: `overview` exists in
+    several corpora at once.
+    """
+    if source:
+        return source, path.removeprefix(f"{source}/")
+    head, _, rest = path.partition("/")
+    if rest and db().execute("SELECT 1 FROM sources WHERE id=?", (head,)).fetchone():
+        return head, rest
+    rows = db().execute("SELECT source FROM pages WHERE path=?", (path,)).fetchall()
+    if len(rows) == 1:
+        return rows[0]["source"], path
+    if not rows:
+        raise ValueError(f"no page at {path!r}")
+    found = ", ".join(f"{r['source']}/{path}" for r in rows)
+    raise ValueError(f"{path!r} is ambiguous across sources: {found}")
+
+
+@mcp.tool()
+def list_sources() -> str:
+    """List the documentation sets in the index, with page counts and freshness."""
+    rows = db().execute("SELECT * FROM sources ORDER BY id").fetchall()
+    scope = enabled_sources()
+    out = []
+    for r in rows:
+        if scope and r["id"] not in scope:
+            continue
+        tags = ", ".join(json.loads(r["tags"] or "[]"))
+        out.append(f"{r['id']:<14} {r['page_count']:>4} pages  [{tags}]  {r['title']}")
+    return "\n".join(out) or "index is empty"
+
+
+@mcp.tool()
+def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
+    """Search the documentation. Returns ranked snippets, not full pages.
+
+    Use this first for any question about a documented tool. Follow up with
+    read_doc on the paths it returns. Omit `source` to search every doc set at
+    once; pass it (e.g. "claude-code") to narrow.
+
+    BM25 tokenizers split on punctuation, so exact symbols like `PreToolUse` or
+    `--flag-name` search fine here, but a literal regex is a job for grep_docs.
+    """
+    scope = [source] if source else enabled_sources()
+    rows, expr = search(db(), query, sources=scope or None, limit=limit)
+    if not rows:
+        return (
+            f"no matches for {query!r}. "
+            f"For an exact symbol or regex, try grep_docs({query!r})."
+        )
+
+    lines = [f"{len(rows)} results (matched: {expr})", ""]
+    for r in rows:
+        anchor = f"#{r['anchor']}" if r["anchor"] else ""
+        lines.append(f"[{r['score']:.1f}] {r['source']}/{r['path']}{anchor}")
+        lines.append(f"      {r['breadcrumb']}")
+        lines.append(f"      {clean_snippet(r['snip'])}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def read_doc(path: str, source: str | None = None, section: str | None = None) -> str:
+    """Read a documentation page, or one section of it.
+
+    `path` is what search_docs returns, e.g. "claude-code/en/hooks". Pass
+    `section` (a heading or its anchor) to read just that part — required for
+    very large pages, which otherwise return an outline to choose from.
+    """
+    src, rel = resolve(path, source)
+    row = db().execute(
+        "SELECT * FROM pages WHERE source=? AND path=?", (src, rel)
+    ).fetchone()
+    if not row:
+        raise ValueError(f"no page at {src}/{rel}")
+
+    # The body already opens with its own H1, so the header is just the source link.
+    head = f"<!-- {src}/{rel} — {row['url']} -->\n"
+    body = row["body"]
+
+    if section:
+        part = extract_section(body, section)
+        if part is None:
+            heads = "\n".join(f"  - {h}" for h in headings(body))
+            raise ValueError(f"no section {section!r} in {src}/{rel}. Sections:\n{heads}")
+        return f"{head}\n{part}"
+
+    if len(body) > BIG_PAGE:
+        outline = "\n".join(f"  - {h}" for h in headings(body))
+        return (
+            f"{head}# {row['title']}\n\n{row['description']}\n\n"
+            f"This page is {len(body) // 1000} KB — too large to return whole.\n"
+            f"Re-call read_doc with section=<one of these>:\n\n{outline}"
+        )
+    return f"{head}\n{body}"
+
+
+HEADING_RE = re.compile(r"^(#{2,3})\s+(.+?)\s*$", re.MULTILINE)
+
+
+def headings(body: str) -> list[str]:
+    return [m.group(2) for m in HEADING_RE.finditer(body)]
+
+
+def extract_section(body: str, wanted: str) -> str | None:
+    """Return a heading and everything under it, up to the next same-or-higher heading."""
+    from anydocs.chunk import anchor_slug
+
+    target = anchor_slug(wanted)
+    marks = list(HEADING_RE.finditer(body))
+    for i, m in enumerate(marks):
+        if anchor_slug(m.group(2)) != target:
+            continue
+        level = len(m.group(1))
+        end = len(body)
+        for nxt in marks[i + 1 :]:
+            if len(nxt.group(1)) <= level:
+                end = nxt.start()
+                break
+        return body[m.start() : end].strip()
+    return None
+
+
+@mcp.tool()
+def grep_docs(pattern: str, source: str | None = None, ignore_case: bool = True) -> str:
+    """Regex search over the raw documentation markdown.
+
+    The escape hatch for what BM25 cannot match: exact flags, config keys, code
+    identifiers. `pattern` is a Python regex. Scope with `source` to keep the
+    output small.
+    """
+    try:
+        rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+    except re.error as exc:
+        raise ValueError(f"bad regex {pattern!r}: {exc}") from None
+
+    scope = [source] if source else enabled_sources()
+    sql = "SELECT source, path, body FROM pages"
+    params: list = []
+    if scope:
+        sql += f" WHERE source IN ({','.join('?' * len(scope))})"
+        params = scope
+    sql += " ORDER BY source, path"
+
+    hits, truncated = [], False
+    for row in db().execute(sql, params):
+        per_page = 0
+        for lineno, line in enumerate(row["body"].splitlines(), 1):
+            if not rx.search(line):
+                continue
+            text = line.strip()[:GREP_MAX_COLS]
+            hits.append(f"{row['source']}/{row['path']}:{lineno}: {text}")
+            per_page += 1
+            if per_page >= GREP_PER_PAGE:
+                break  # one page cannot flood the result list
+        if len(hits) >= GREP_MAX_MATCHES:
+            truncated = True
+            break
+
+    if not hits:
+        return f"no matches for {pattern!r}"
+    out = "\n".join(hits[:GREP_MAX_MATCHES])
+    if truncated:
+        out += f"\n… more than {GREP_MAX_MATCHES} matches; narrow the pattern or pass source="
+    return out
+
+
+@mcp.tool()
+def list_pages(source: str, prefix: str = "") -> str:
+    """List a source's pages with their descriptions — a cheap map of what exists."""
+    rows = db().execute(
+        "SELECT path, title, description FROM pages "
+        "WHERE source=? AND path LIKE ? ORDER BY path",
+        (source, f"{prefix}%"),
+    ).fetchall()
+    if not rows:
+        raise ValueError(f"no pages in {source!r} under {prefix!r}")
+    return "\n".join(
+        f"{source}/{r['path']}\n      {r['title']}"
+        + (f" — {r['description'][:110]}" if r["description"] else "")
+        for r in rows
+    )
+
+
+def main() -> int:
+    try:
+        ensure_index()
+    except Exception as exc:  # noqa: BLE001
+        print(f"anydocs: cannot open index: {exc}", file=sys.stderr)
+        return 1
+    mcp.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

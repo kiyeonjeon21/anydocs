@@ -1,0 +1,12 @@
+id: cursor
+title: Cursor
+tags: [coding-agent]
+strategy: sitemap
+# No llms.txt. docs.cursor.com soft-404s (HTTP 200 + SPA shell) on everything,
+# so the sitemap must be taken from cursor.com/docs.
+entry: https://cursor.com/docs/sitemap.xml
+base_url: https://cursor.com/docs/
+page_suffix: .md
+# The sitemap carries 13 locales (3347 URLs); English pages have no locale prefix.
+include: ["https://cursor.com/docs/*"]
+expect_pages: 165
