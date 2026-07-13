@@ -177,7 +177,7 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
         anchor = f"#{r['anchor']}" if r["anchor"] else ""
         lines.append(f"[{r['score']:.1f}] {r['source']}/{r['path']}{anchor}")
         lines.append(f"      {r['breadcrumb']}")
-        lines.append(f"      {clean_snippet(r['snip'])}")
+        lines.append(f"      {clean_snippet(r['snip'], r['description'])}")
         lines.append("")
     return "\n".join(lines)
 

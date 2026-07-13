@@ -87,10 +87,12 @@ def compile_query(raw: str) -> list[str]:
 SEARCH_SQL = """
 WITH hits AS (
   SELECT c.source, c.path, c.anchor, c.breadcrumb, c.title, c.heading,
+         p.description,
          -bm25(chunks_fts, ?, ?, ?) AS score,
          snippet(chunks_fts, 2, '«', '»', '…', ?) AS snip
   FROM chunks_fts
   JOIN chunks c ON c.id = chunks_fts.rowid
+  JOIN pages  p ON p.source = c.source AND p.path = c.path
   WHERE chunks_fts MATCH ?
     {source_filter}
   ORDER BY score DESC
@@ -109,7 +111,7 @@ ranked AS (
          ROW_NUMBER() OVER (ORDER BY score DESC)                           AS global_rank
   FROM dedup
 )
-SELECT source, path, anchor, breadcrumb, title, heading, score, snip
+SELECT source, path, anchor, breadcrumb, title, heading, description, score, snip
 FROM ranked
 WHERE page_rank <= 2
   AND (global_rank <= 3 OR src_rank <= ?)
@@ -126,16 +128,25 @@ LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 BARE_URL = re.compile(r"<https?://[^>]*>|https?://\S+")
 
 
+TABLE_HEAD = re.compile(r"^\s*\|[^\n]*\|\s*\n\s*\|[\s|:-]+\|", re.MULTILINE)
+
+
 def clean_snippet(snip: str, fallback: str = "") -> str:
     """Flatten a snippet to one short line.
 
     FTS5 returns raw markdown, so a hit inside a code block drags fences and
     indentation along. When the match was in the title/heading only, snippet()
     has no body match to centre on and just returns the head of the body — the
-    absence of « » markers is how we detect that.
+    absence of « » markers is how we detect that, and the page description is a
+    far better thing to show.
+
+    That head is often a table header, because the reference pages are built
+    from tables. It is exactly the wrong answer on exactly the pages people
+    search for most: asking about a CLI flag and being shown
+    `| Flag | Description | Example |` tells you nothing.
     """
     snip = BARE_URL.sub(" ", LINK.sub(r"\1", snip))
-    text = WS.sub(" ", FENCE.sub(" ", snip)).strip()
+    text = WS.sub(" ", FENCE.sub(" ", TABLE_HEAD.sub(" ", snip))).strip()
     if "«" not in text and fallback:
         text = WS.sub(" ", fallback).strip()
     if len(text) > SNIPPET_CHARS:

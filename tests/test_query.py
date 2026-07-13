@@ -99,6 +99,19 @@ def test_clean_snippet_drops_link_urls_but_keeps_highlights():
     assert clean_snippet("go to https://example.com/x now") == "go to now"
 
 
+def test_clean_snippet_replaces_a_table_header_with_the_description():
+    """The reference pages are tables, so a title-only match centres the snippet
+    on the header row — `| Flag | Description | Example |` answers nothing, and
+    it happens on exactly the pages people search for most."""
+    header = "| Flag | Description | Example |\n| :--- | :--- | :--- |\n| `--x` | does x |"
+    assert clean_snippet(header, "Complete reference for the CLI.") == (
+        "Complete reference for the CLI."
+    )
+    # A real body match is kept even when the chunk happens to be a table.
+    hit = "| `--«flag»` | turns it on |"
+    assert clean_snippet(hit, "unused").startswith("| `--«flag»`")
+
+
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
