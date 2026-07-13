@@ -10,10 +10,7 @@
         "--from",
         "git+https://github.com/kiyeonjeon21/anydocs",
         "anydocs"
-      ],
-      "env": {
-        "ANYDOCS_SOURCES": "claude-code"
-      }
+      ]
     }
   }
 }

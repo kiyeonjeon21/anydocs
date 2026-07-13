@@ -37,7 +37,12 @@ async def run_build(sources_dir: Path, out: Path) -> int:
             print(f"  {source.id:<12} FAILED: {exc}", file=sys.stderr)
             continue
 
-        if source.expect_pages and len(pages) < source.expect_pages * 0.8:
+        # Too few means the site moved; too many means a filter stopped matching.
+        # Both are silent otherwise: opencode's 17 locales slipped past a glob
+        # that looked right, and quietly multiplied the source by 17.
+        if source.expect_pages and not (
+            source.expect_pages * 0.8 <= len(pages) <= source.expect_pages * 1.25
+        ):
             failures.append(
                 f"{source.id}: got {len(pages)} pages, expected ~{source.expect_pages}"
             )

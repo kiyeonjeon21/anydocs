@@ -89,6 +89,9 @@ def test_anchor_slug_matches_live_site_ids():
     assert anchor_slug('Network access <ElevatedRiskBadge class="ml-2" />', "verbatim") == (
         "network-access-"
     )
+    # opencode (github/Starlight): the dot is DROPPED, where Mintlify makes it a dash
+    assert anchor_slug("Avante.nvim", "github") == "avantenvim"
+    assert anchor_slug("JetBrains IDEs", "github") == "jetbrains-ides"
 
 
 def test_clean_snippet_flattens_and_truncates():

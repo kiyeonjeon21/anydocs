@@ -1,0 +1,36 @@
+id: opencode
+title: opencode
+tags: [coding-agent]
+# No llms.txt. The .md twin works (docs/cli -> docs/cli.md), so this is the same
+# shape as cursor: page list from the sitemap, body from the twin.
+strategy: sitemap
+entry: https://opencode.ai/sitemap.xml
+base_url: https://opencode.ai/docs/
+page_suffix: .md
+include: ["https://opencode.ai/docs/*"]
+# 17 locales live *under* /docs/, not before it as on cursor, so `include` cannot
+# separate them. They must be listed — and one glob per locale, because fnmatch
+# has no brace expansion: a `{ja,ko}` pattern matches nothing and silently lets
+# every translation into the index. expect_pages is the backstop if a new locale
+# appears here.
+exclude:
+  - "https://opencode.ai/docs/ar/*"
+  - "https://opencode.ai/docs/da/*"
+  - "https://opencode.ai/docs/de/*"
+  - "https://opencode.ai/docs/es/*"
+  - "https://opencode.ai/docs/fr/*"
+  - "https://opencode.ai/docs/it/*"
+  - "https://opencode.ai/docs/ja/*"
+  - "https://opencode.ai/docs/ko/*"
+  - "https://opencode.ai/docs/nb/*"
+  - "https://opencode.ai/docs/pl/*"
+  - "https://opencode.ai/docs/pt-br/*"
+  - "https://opencode.ai/docs/ru/*"
+  - "https://opencode.ai/docs/th/*"
+  - "https://opencode.ai/docs/tr/*"
+  - "https://opencode.ai/docs/uk/*"
+  - "https://opencode.ai/docs/zh-cn/*"
+  - "https://opencode.ai/docs/zh-tw/*"
+expect_pages: 36
+# Astro Starlight (github-slugger): a dot is dropped, not turned into a dash.
+slug_style: github

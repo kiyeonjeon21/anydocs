@@ -39,21 +39,30 @@ MD_FORMATTING = re.compile(r"<[^>]*>|`|\*\*|\*|~~|\]\([^)]*\)|[\[\]]")
 def anchor_slug(heading: str, style: str = "collapse") -> str:
     """Slugify a heading the way the docs site actually does, so `path#anchor` resolves.
 
-    Checked against the live HTML, and the sites do not agree — hence `style`:
+    Read off the live HTML of each site, and they do not agree — hence `style`.
+    The difference nobody would guess is what happens to a dot:
 
-      claude-code  `/compact` - Compact conversation history -> /compact-compact-…
-                   (runs of dashes collapse, and the slash SURVIVES:
-                    `apt / dnf / apk` -> `apt-/-dnf-/-apk`)
-      xai          Privacy & data lifecycle -> privacy--data-lifecycle
-      codex        Network access <ElevatedRiskBadge /> -> network-access-
-                   (no collapsing, and the trailing dash is kept)
+      collapse  (Mintlify: claude-code, cursor)
+                `CLAUDE.md` -> claude-md          — dot becomes a separator
+                `apt / dnf / apk` -> apt-/-dnf-/-apk  — the SLASH survives
+                `` `/compact` - Compact… `` -> /compact-compact-…  — dashes collapse
 
-    Common to all: lowercase, markdown and JSX stripped, `.` and whitespace act
-    as separators (`CLAUDE.md` -> `claude-md`), `/` is literal, other
-    punctuation is dropped. Dropping the slash — the obvious reading of "strip
-    punctuation" — quietly breaks every link to such a section.
+      verbatim  (xai, codex)
+                `Privacy & data lifecycle` -> privacy--data-lifecycle  — no collapsing
+                `Network access <Badge />` -> network-access-          — trailing dash kept
+
+      github    (Astro Starlight: opencode)
+                `Avante.nvim` -> avantenvim       — dot simply DROPPED
+
+    Common to all: lowercase, markdown and JSX stripped, whitespace to dashes.
+    Dropping the slash — the obvious reading of "strip punctuation" — quietly
+    breaks every Mintlify link to such a section, and nothing else would notice:
+    a wrong slug still ranks fine, it just lands in the wrong place.
     """
     text = MD_FORMATTING.sub("", heading).lower()
+    if style == "github":
+        return re.sub(r"\s", "-", re.sub(r"[^\w\s-]", "", text).strip())
+
     text = re.sub(r"[^\w\s/.-]", "", text)
     text = re.sub(r"[\s.]", "-", text.strip() if style == "collapse" else text)
     if style == "collapse":
