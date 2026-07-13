@@ -15,8 +15,12 @@ REPO = os.environ.get("ANYDOCS_REPO", "kiyeonjeon21/anydocs")
 RELEASE_TAG = os.environ.get("ANYDOCS_RELEASE", "index-latest")
 ARTIFACT_NAME = "anydocs-index.tar.zst"
 
-# Upstream syncs once a day; checking more often is pure startup latency.
-CHECK_INTERVAL = 6 * 3600
+# How stale the cache may get before we ask GitHub again. The check is a ~400
+# byte GET (~150 ms) against a server that takes longer than that to boot, so
+# this exists only to stop rapid restarts hammering it. It was 6 h, which meant a
+# fixed index could sit undelivered for most of a working day while the tool
+# looked broken. ANYDOCS_REFRESH=1 skips the throttle outright.
+CHECK_INTERVAL = 3600
 DB_NAME = "anydocs.db"
 
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "anydocs"
@@ -103,7 +107,8 @@ def _needs_download(cached: Path) -> bool:
     manifest = cached / "manifest.json"
     if not (cached / DB_NAME).exists() or not manifest.exists():
         return True
-    if time.time() - manifest.stat().st_mtime < CHECK_INTERVAL:
+    forced = os.environ.get("ANYDOCS_REFRESH") == "1"
+    if not forced and time.time() - manifest.stat().st_mtime < CHECK_INTERVAL:
         return False
 
     published = _published_hash()

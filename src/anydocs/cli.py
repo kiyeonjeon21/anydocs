@@ -77,11 +77,21 @@ async def run_build(sources_dir: Path, out: Path) -> int:
     return 0
 
 
+# The modules that decide how pages become an index. Hashing them means a change
+# to chunking, titles or slugs republishes — hashing only the page bodies did
+# not, so a fix to how the docs are indexed could sit undelivered forever while
+# CI cheerfully reported "documentation unchanged".
+INDEXER_MODULES = ["chunk.py", "index.py", "models.py", "ingest/filters.py"]
+
+
 def content_hash(ingested: list[tuple[Source, list[Page]]]) -> str:
     digest = hashlib.sha256()
+    src = Path(__file__).parent
+    for name in INDEXER_MODULES:
+        digest.update((src / name).read_bytes())
     for _, pages in ingested:
         for page in sorted(pages, key=lambda p: (p.source, p.path)):
-            digest.update(f"{page.source}\0{page.path}\0".encode())
+            digest.update(f"{page.source}\0{page.path}\0{page.title}\0".encode())
             digest.update(page.body.encode())
     return digest.hexdigest()
 
