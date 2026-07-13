@@ -14,6 +14,7 @@ on:
     paths:
       - "sources/**"
       - "src/anydocs/**"
+      - ".github/workflows/sync.yml"   # or a fix to this filter cannot trigger itself
 
 permissions:
   contents: write
