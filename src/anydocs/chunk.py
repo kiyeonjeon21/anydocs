@@ -12,14 +12,13 @@ FENCE_RE = re.compile(r"^\s*(```|~~~)")
 # reference is a single 227 KB page; one chunk that size would swamp bm25's
 # length normalisation and blow up any snippet we cut from it.
 #
-# 2000, not 4000: bm25 normalises by length, so a long chunk buries the sentence
-# that actually answers the question. `Settings precedence` is 4.3 KB — its lead
-# ("Settings apply in order of precedence. From highest to lowest: ...") shared a
-# chunk with 3.7 KB of managed-tier minutiae, and a page that merely *links* to
-# it outranked it. Swept 1000-4000 against both gold sets: every size at or below
-# 3000 fixes that, and 2000 does it without moving the 276-question score
-# (MRR 0.857 vs 0.858) — the fix is free, not a trade.
-MAX_CHUNK = 2000
+# Do not "tune" this. Swept 1000-4000 against both gold sets (scripts/
+# sweep_chunk.py): nothing beats 4000. Smaller chunks look like they fix
+# "settings file precedence order" — and they do — but they break "hook events
+# list" and "config.toml model provider" in exchange, for no net gain. A run
+# that reported 2000 as a win was measuring with a gold set that matched paths
+# by substring, so `en/hooks` also "matched" `en/hooks-guide`.
+MAX_CHUNK = 4000
 MIN_CHUNK = 60
 
 

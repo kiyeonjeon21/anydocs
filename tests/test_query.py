@@ -7,7 +7,7 @@ import pytest
 from anydocs.chunk import anchor_slug, chunk_page
 from anydocs.ingest.fetch import SoftNotFound, validate_markdown
 from anydocs.models import Page
-from anydocs.query import clean_snippet, compile_query, query_units
+from anydocs.query import clean_snippet, compile_query, dropped_terms, query_units
 
 
 class FakeResponse:
@@ -91,6 +91,29 @@ def test_clean_snippet_flattens_and_truncates():
     # No « » means the match was title-only, so snippet() just returned the head.
     assert clean_snippet("no highlight here", fallback="better text") == "better text"
     assert clean_snippet("has «hit» here", fallback="unused") == "has «hit» here"
+
+
+def test_clean_snippet_drops_link_urls_but_keeps_highlights():
+    snip = "See the [«hook» «events» list](/en/hooks#hook-events) for more"
+    assert clean_snippet(snip) == "See the «hook» «events» list for more"
+    assert clean_snippet("go to https://example.com/x now") == "go to now"
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        # The index is English; these words reach nothing and must not be dropped
+        # in silence — "claude code 훅 이벤트" would quietly become "claude code".
+        ("설정 우선순위 알려줘", ["설정", "우선순위", "알려줘"]),
+        ("claude code 훅 이벤트", ["훅", "이벤트"]),
+        ("フック イベント", ["フック", "イベント"]),
+        ("hook events list", []),
+        ("--dangerously-skip-permissions", []),
+        ("??? 🤔", []),  # punctuation and emoji carry no meaning; nothing to warn about
+    ],
+)
+def test_dropped_terms_flags_unsearchable_words(query, expected):
+    assert dropped_terms(query) == expected
 
 
 def test_chunker_ignores_headings_inside_code_fences():

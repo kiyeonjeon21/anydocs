@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from anydocs.artifact import ensure_index
 from anydocs.index import connect
-from anydocs.query import clean_snippet, search
+from anydocs.query import clean_snippet, dropped_terms, search
 
 # Anything longer than this is summarised as an outline instead of returned whole.
 # The Claude Code hooks reference is 227 KB, and guarding only the page is not
@@ -89,18 +89,38 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     read_doc on the paths it returns. Omit `source` to search every doc set at
     once; pass it (e.g. "claude-code") to narrow.
 
-    BM25 tokenizers split on punctuation, so exact symbols like `PreToolUse` or
-    `--flag-name` search fine here, but a literal regex is a job for grep_docs.
+    **Query in English.** The indexed docs are English and matching is lexical,
+    so a question in another language finds nothing — translate it to English
+    keywords first ("훅 이벤트 목록" -> "hook events list").
+
+    Keyword-style queries work best; filler words are dropped. Exact symbols like
+    `PreToolUse` or `--flag-name` search fine here, but there is no fuzzy
+    matching, so a typo finds nothing and a literal regex is a job for grep_docs.
     """
     scope = [source] if source else enabled_sources()
     rows, expr = search(db(), query, sources=scope or None, limit=limit)
+    dropped = dropped_terms(query)
+
     if not rows:
+        if dropped:
+            return (
+                f"no matches: the index is English-only, and {', '.join(dropped)!r} "
+                f"cannot be searched. Translate the query to English keywords."
+            )
         return (
-            f"no matches for {query!r}. "
-            f"For an exact symbol or regex, try grep_docs({query!r})."
+            f"no matches for {query!r}. There is no fuzzy matching, so check the "
+            f"spelling; for an exact symbol or regex, try grep_docs({query!r})."
         )
 
-    lines = [f"{len(rows)} results (matched: {expr})", ""]
+    lines = []
+    if dropped:
+        # Never let a half-understood query pass as a confident answer.
+        lines += [
+            f"WARNING: {', '.join(dropped)} was ignored (the index is English-only), "
+            f"so these results answer only {expr}. Re-search in English.",
+            "",
+        ]
+    lines += [f"{len(rows)} results (matched: {expr})", ""]
     for r in rows:
         anchor = f"#{r['anchor']}" if r["anchor"] else ""
         lines.append(f"[{r['score']:.1f}] {r['source']}/{r['path']}{anchor}")

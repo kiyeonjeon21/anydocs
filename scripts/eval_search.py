@@ -29,28 +29,32 @@ def doc_freq(conn: sqlite3.Connection, unit: str) -> int:
 class Case:
     query: str
     source: str
-    gold: tuple[str, ...]  # any of these page-path substrings is a correct answer
+    gold: tuple[str, ...]  # EXACT page paths; any one of them is a correct answer
 
 
+# Every path below was checked to exist. Two earlier bugs made this set lie:
+# it matched paths by substring, so `en/hooks` also "matched" `en/hooks-guide`
+# and scored a wrong page as right; and it demanded `en/slash-commands`, a page
+# that does not exist — search was returning the right thing and being marked
+# wrong for it. Exact paths only, and list every page that genuinely answers.
 GOLD = [
     Case("hook events list", "claude-code", ("en/hooks",)),
     Case("what hook events exist", "claude-code", ("en/hooks",)),
     Case("settings file precedence order", "claude-code", ("en/settings",)),
-    Case("how do I add a hook", "claude-code", ("en/hooks",)),
+    Case("how do I add a hook", "claude-code", ("en/hooks-guide", "en/hooks")),
     Case("restrict which tools a subagent can use", "claude-code", ("en/sub-agents",)),
     Case("MCP server scopes local project user", "claude-code", ("en/mcp",)),
     Case("--dangerously-skip-permissions", "claude-code", ("en/cli-reference",)),
     Case("output styles", "claude-code", ("en/output-styles",)),
-    Case("slash command frontmatter", "claude-code", ("en/slash-commands",)),
-    Case("plugin marketplace", "claude-code", ("en/plugin",)),
-    # Two pages genuinely answer this: `sandboxing` explains the modes, and
-    # config-advanced has a section literally titled "Approval policies and
-    # sandbox modes". Scoring one of them as a miss would be scoring the gold
-    # set's opinion, not the retrieval.
-    Case("sandbox modes approval policy", "codex", ("sandboxing", "config-advanced")),
-    Case("AGENTS.md nesting precedence", "codex", ("agents-md",)),
-    Case("config.toml model provider", "codex", ("config",)),
-    Case("codex cloud environment setup", "codex", ("cloud",)),
+    Case("slash command frontmatter", "claude-code", ("en/commands",)),
+    Case("plugin marketplace", "claude-code", ("en/plugin-marketplaces", "en/discover-plugins")),
+    # Both genuinely answer it: `sandboxing` explains the modes, and
+    # config-advanced has a section titled "Approval policies and sandbox modes".
+    Case("sandbox modes approval policy", "codex", ("sandboxing", "config-file/config-advanced")),
+    Case("AGENTS.md nesting precedence", "codex", ("agent-configuration/agents-md",)),
+    Case("config.toml model provider", "codex",
+         ("config-file/config-basic", "config-file/config-advanced")),
+    Case("codex cloud environment setup", "codex", ("cloud", "environments/cloud-environment")),
     Case("custom prompts slash commands", "codex", ("custom-prompts",)),
 ]
 
@@ -95,9 +99,9 @@ def evaluate(conn, name: str, strategy, **kw) -> tuple[int, int, list[str]]:
             paths = run(conn, expr, case.source, 3)
             if paths:
                 break
-        if paths and any(g in paths[0] for g in case.gold):
+        if paths and paths[0] in case.gold:
             at1 += 1
-        if any(g in p for p in paths for g in case.gold):
+        if set(paths) & set(case.gold):
             at3 += 1
         else:
             misses.append(f"{case.query!r} -> {paths[0] if paths else '(none)'}")

@@ -12,6 +12,21 @@ SNIPPET_CHARS = 300
 
 TERM = re.compile(r"[0-9A-Za-zÀ-ɏ]+")
 
+# Anything the tokenizer cannot use. The indexed docs are English, so a query in
+# another script matches nothing — the words are dropped. Silently dropping them
+# is the danger: "claude code 훅 이벤트" would quietly become "claude code" and
+# return a confident, unrelated answer. Detect it and say so.
+NON_LATIN = re.compile(r"[^\W\d_]", re.UNICODE)
+
+
+def dropped_terms(raw: str) -> list[str]:
+    """Words in the query that carry meaning but cannot reach the index."""
+    return [
+        w
+        for w in raw.split()
+        if not TERM.findall(w) and NON_LATIN.search(w)
+    ]
+
 # Filler that swamps BM25 on natural-language queries. Measured: "how do I add a
 # hook" ranked an xAI FAQ ("How do I add other sign-in methods?") first until
 # these were dropped; without them the real answer (hooks-guide › Set up your
@@ -104,6 +119,11 @@ LIMIT ?
 
 FENCE = re.compile(r"^\s*(```|~~~).*$", re.MULTILINE)
 WS = re.compile(r"\s+")
+# `[hook events list](/en/hooks#hook-events)` reads as pure noise in a snippet,
+# and the URL is usually longer than the text it labels. Stripped at display
+# time only: taking it out of the indexed body instead measurably hurt ranking.
+LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+BARE_URL = re.compile(r"<https?://[^>]*>|https?://\S+")
 
 
 def clean_snippet(snip: str, fallback: str = "") -> str:
@@ -114,6 +134,7 @@ def clean_snippet(snip: str, fallback: str = "") -> str:
     has no body match to centre on and just returns the head of the body — the
     absence of « » markers is how we detect that.
     """
+    snip = BARE_URL.sub(" ", LINK.sub(r"\1", snip))
     text = WS.sub(" ", FENCE.sub(" ", snip)).strip()
     if "«" not in text and fallback:
         text = WS.sub(" ", fallback).strip()

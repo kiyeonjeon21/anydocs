@@ -67,8 +67,8 @@ def hand_score(conn, w) -> tuple[int, int, bool]:
     for case in GOLD:
         expr = " OR ".join(query_units(case.query))
         paths = [r["path"] for r in conn.execute(sql, [*w, SNIPPET_TOKENS, expr, case.source, 3, 3])]
-        top = paths and any(g in paths[0] for g in case.gold)
-        in3 = any(g in p for p in paths for g in case.gold)
+        top = bool(paths) and paths[0] in case.gold
+        in3 = bool(set(paths) & set(case.gold))
         at1 += bool(top)
         at3 += bool(in3)
         if case.query == "settings file precedence order" and in3:
