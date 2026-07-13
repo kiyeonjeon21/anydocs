@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from anydocs.artifact import ensure_index
 from anydocs.index import connect
-from anydocs.query import absent_terms, clean_snippet, dropped_terms, search
+from anydocs.query import clean_snippet, dropped_terms, search, unmatched_terms
 
 # Anything longer than this is summarised as an outline instead of returned whole.
 # The Claude Code hooks reference is 227 KB, and guarding only the page is not
@@ -172,13 +172,15 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
             f"so these results answer only {expr}. Re-search in English.",
             "",
         ]
-    if absent := absent_terms(db(), query, scope):
-        # Matching is OR, so a query always finds *something*. Say which word
-        # found nothing, or "tensorflow model training loop" reads as if these
-        # docs discussed TensorFlow.
+    if missed := unmatched_terms(db(), query, rows):
+        # Matching is OR, so a query always finds *something* — usually off its
+        # least interesting words. Say which words never reached the results, or
+        # a question about `cursorrules` reads as answered by the pages that
+        # merely happened to contain `tab`.
         lines += [
-            f"NOTE: {', '.join(absent)} appears nowhere in these docs — the hits "
-            f"below match only the other words (or it is a typo).",
+            f"NOTE: no result below contains {', '.join(missed)}. They matched on "
+            f"the other words only — so if {missed[0]!r} is the point of the "
+            f"question, these are not the answer (try grep_docs, or check the spelling).",
             "",
         ]
     lines += [f"{len(rows)} results (matched: {expr})", ""]

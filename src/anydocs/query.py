@@ -86,7 +86,8 @@ def compile_query(raw: str) -> list[str]:
 
 SEARCH_SQL = """
 WITH hits AS (
-  SELECT c.source, c.path, c.anchor, c.breadcrumb, c.title, c.heading,
+  SELECT c.id AS chunk_id,
+         c.source, c.path, c.anchor, c.breadcrumb, c.title, c.heading,
          p.description,
          -bm25(chunks_fts, ?, ?, ?) AS score,
          snippet(chunks_fts, 2, '«', '»', '…', ?) AS snip
@@ -111,7 +112,7 @@ ranked AS (
          ROW_NUMBER() OVER (ORDER BY score DESC)                           AS global_rank
   FROM dedup
 )
-SELECT source, path, anchor, breadcrumb, title, heading, description, score, snip
+SELECT chunk_id, source, path, anchor, breadcrumb, title, heading, description, score, snip
 FROM ranked
 WHERE page_rank <= 2
   AND (global_rank <= 3 OR src_rank <= ?)
@@ -154,28 +155,34 @@ def clean_snippet(snip: str, fallback: str = "") -> str:
     return text
 
 
-def absent_terms(
-    conn: sqlite3.Connection, query: str, sources: list[str] | None = None
+def unmatched_terms(
+    conn: sqlite3.Connection, query: str, rows: list[sqlite3.Row]
 ) -> list[str]:
-    """Query words that appear in no chunk at all.
+    """Query words that appear in none of the results.
 
-    OR matching always finds something: asking about TensorFlow returns three
-    confident-looking hits, because `model` and `loop` are everywhere in these
-    docs. The scores are lower, but nothing tells the caller what "lower" means.
-    Naming the word that is simply absent does — it turns a puzzling weak result
-    into "the docs do not mention TensorFlow", and catches typos for free.
+    OR matching always finds something, and the words it finds are the wrong
+    ones. Asking Claude Code's docs about "cursorrules composer tab autocomplete"
+    returns keyboard-shortcut pages: `cursorrules` and `composer` are mentioned
+    once or twice in the whole corpus and never rank, while `tab` and
+    `autocomplete` are everywhere. Nothing in the reply says the distinctive
+    words missed, so an agent can report the shortcut docs as an answer about
+    Cursor compatibility.
+
+    Checking the corpus is not enough — a word mentioned in one chunk out of
+    4,000 is present but useless. What matters is whether it reached the results
+    the caller is about to read.
     """
-    sql = "SELECT 1 FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid WHERE chunks_fts MATCH ?"
-    params: list = []
-    if sources:
-        sql += f" AND c.source IN ({','.join('?' * len(sources))})"
-        params = list(sources)
-    sql += " LIMIT 1"
-
+    ids = [r["chunk_id"] for r in rows]
+    if not ids:
+        return []
+    sql = (
+        f"SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ? "
+        f"AND rowid IN ({','.join('?' * len(ids))}) LIMIT 1"
+    )
     missing = []
     for unit in query_units(query):
         try:
-            hit = conn.execute(sql, [unit, *params]).fetchone()
+            hit = conn.execute(sql, [unit, *ids]).fetchone()
         except sqlite3.OperationalError:
             continue
         if not hit:

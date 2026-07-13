@@ -9,11 +9,11 @@ from anydocs.ingest.fetch import SoftNotFound, validate_markdown
 from anydocs.models import Page
 from anydocs.index import SCHEMA
 from anydocs.query import (
-    absent_terms,
     clean_snippet,
     compile_query,
     dropped_terms,
     query_units,
+    unmatched_terms,
 )
 
 
@@ -136,25 +136,35 @@ def test_dropped_terms_flags_unsearchable_words(query, expected):
     assert dropped_terms(query) == expected
 
 
-def test_absent_terms_names_words_the_corpus_never_uses():
-    """OR matching always finds *something*: a TensorFlow question returns
-    confident-looking hits off `model` and `loop` alone. Naming the absent word
-    is what turns that into "these docs don't discuss TensorFlow"."""
+def test_unmatched_terms_names_words_that_missed_the_results():
+    """OR matching always finds something, off the query's *least* interesting
+    words. Asking Claude Code about `cursorrules composer tab autocomplete`
+    returns keyboard-shortcut pages, because `tab` is everywhere while
+    `cursorrules` is mentioned twice in the whole corpus and never ranks.
+
+    Corpus presence is the wrong test — a word in 1 chunk of 4,000 is present
+    and useless. What matters is whether it reached the results being read.
+    """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    conn.execute(
-        "INSERT INTO chunks(source,path,anchor,breadcrumb,title,heading,body) "
-        "VALUES ('s','p','','b','Hooks','Hook events','the model runs a hook loop')"
+    conn.executemany(
+        "INSERT INTO chunks(source,path,anchor,breadcrumb,title,heading,body) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("s", "keys", "", "b", "Keys", "Autocomplete", "press tab for autocomplete"),
+            ("s", "migrate", "", "b", "Migrate", "From Cursor", "cursorrules is not read"),
+        ],
     )
     conn.execute(
         "INSERT INTO chunks_fts(rowid,title,heading,body) "
         "SELECT id,title,heading,body FROM chunks"
     )
+    rows = conn.execute("SELECT id AS chunk_id FROM chunks WHERE path='keys'").fetchall()
 
-    assert absent_terms(conn, "tensorflow model loop") == ["tensorflow"]
-    assert absent_terms(conn, "model hook") == []
-    assert absent_terms(conn, "hok modle") == ["hok", "modle"]  # typos surface too
+    # `cursorrules` exists in the corpus but is absent from what was returned.
+    assert unmatched_terms(conn, "cursorrules tab autocomplete", rows) == ["cursorrules"]
+    assert unmatched_terms(conn, "tab autocomplete", rows) == []
+    assert unmatched_terms(conn, "anything", []) == []
 
 
 def test_unknown_source_is_refused_not_silently_empty(monkeypatch):
