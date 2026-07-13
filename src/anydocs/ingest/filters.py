@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from fnmatch import fnmatch
 
+from anydocs.chunk import iter_headings
 from anydocs.models import Source
 
 
@@ -13,6 +14,13 @@ def allowed(url: str, source: Source) -> bool:
 
 
 TITLE_RE = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
+
+
+def prettify_path(path: str) -> str:
+    """`agent/tools/web-search` -> `Web Search`. A last resort when a page has no
+    H1 at all — 70 pages across cursor and opencode — and the raw path was being
+    shown as the title."""
+    return path.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").title()
 
 
 def clean_body(body: str) -> str:
@@ -34,9 +42,14 @@ def clean_body(body: str) -> str:
 
 
 def extract_title(body: str, fallback: str) -> str:
-    """First H1. Pages may open with a nav breadcrumb ("#### CLI") before it."""
-    m = TITLE_RE.search(body)
-    return m["title"].strip() if m else fallback
+    """First real H1 — not one inside a fenced block, where `#` is a comment.
+
+    opencode's pages mostly have no H1, so the first `# ...` line in the file was
+    a bash comment in an example: `troubleshooting` was titled `or`, `rules` was
+    titled `SST v3 Monorepo Project`. Titles carry 10x weight in the ranking.
+    """
+    title = next((t for lvl, t in iter_headings(body, 1, 1)), None)
+    return title or prettify_path(fallback)
 
 
 def extract_description(body: str) -> str:

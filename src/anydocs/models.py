@@ -41,7 +41,12 @@ class Page:
 
 
 def slug_path(url: str, base_url: str) -> str:
-    """URL -> source-relative path. Strips the base prefix and any .md suffix."""
+    """URL -> source-relative path. Strips the base prefix and any .md suffix.
+
+    The docs root itself (`opencode.ai/docs/`) reduces to the empty string, which
+    search happily returned as `opencode/` — a path read_doc then refused. An
+    8 KB intro page was visible and unreadable.
+    """
     path = url.removeprefix(base_url) if base_url and url.startswith(base_url) else url
     path = re.sub(r"^https?://[^/]+/", "", path)
-    return path.removesuffix(".md").strip("/")
+    return path.removesuffix(".md").strip("/") or "index"

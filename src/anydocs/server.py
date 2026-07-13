@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from anydocs.artifact import ensure_index
 from anydocs.index import connect
+from anydocs.chunk import iter_headings
 from anydocs.query import clean_snippet, dropped_terms, search, unmatched_terms
 
 # Anything longer than this is summarised as an outline instead of returned whole.
@@ -258,7 +259,9 @@ HEADING_RE = re.compile(r"^(#{2,3})\s+(.+?)\s*$", re.MULTILINE)
 
 
 def headings(body: str) -> list[str]:
-    return [m.group(2) for m in HEADING_RE.finditer(body)]
+    # Fence-aware: a `## foo` inside a bash block is a comment, not a section the
+    # caller can ask for.
+    return [text for _, text in iter_headings(body, 2, 3)]
 
 
 def extract_section(body: str, wanted: str) -> str | None:

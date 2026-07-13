@@ -6,7 +6,8 @@ import pytest
 
 from anydocs.chunk import anchor_slug, chunk_page
 from anydocs.ingest.fetch import SoftNotFound, validate_markdown
-from anydocs.models import Page
+from anydocs.ingest.filters import extract_title
+from anydocs.models import Page, slug_path
 from anydocs.index import SCHEMA
 from anydocs.query import (
     clean_snippet,
@@ -184,6 +185,26 @@ def test_unknown_source_is_refused_not_silently_empty(monkeypatch):
     assert server.scope_for(None) is None
     with pytest.raises(ValueError, match="unknown source 'claude'.*claude-code, codex"):
         server.scope_for("claude")
+
+
+def test_title_is_not_lifted_from_a_shell_comment():
+    """`#` inside a fence is a comment, not a heading. opencode's pages mostly
+    have no H1, so the first `# ...` line in the file was a bash comment:
+    `troubleshooting` was titled `or`, `rules` was titled `SST v3 Monorepo
+    Project`. Titles carry 10x weight in the ranking.
+    """
+    body = "Some prose.\n\n```bash\n# or\nopencode --help\n```\n\n## Real section\n"
+    assert extract_title(body, "troubleshooting") == "Troubleshooting"
+    # A real H1 still wins over the path.
+    assert extract_title("# Actual Title\n\ntext", "some/path") == "Actual Title"
+
+
+def test_docs_root_gets_a_readable_path():
+    """`opencode.ai/docs/` reduces to the empty string. Search returned it as
+    `opencode/`, a path read_doc then refused — an 8 KB page, visible and
+    unreadable."""
+    assert slug_path("https://opencode.ai/docs/", "https://opencode.ai/docs/") == "index"
+    assert slug_path("https://opencode.ai/docs/cli.md", "https://opencode.ai/docs/") == "cli"
 
 
 def test_chunker_ignores_headings_inside_code_fences():

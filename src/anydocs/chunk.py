@@ -7,6 +7,25 @@ from anydocs.models import Page
 
 HEADING_RE = re.compile(r"^(?P<hashes>#{2,3})\s+(?P<text>.+?)\s*$")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
+ANY_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
+
+
+def iter_headings(body: str, min_level: int = 1, max_level: int = 6):
+    """Yield (level, text) for real headings only.
+
+    A `#` inside a fenced block is a shell comment, not a heading. Missing that
+    is how `opencode/troubleshooting` ended up titled `or` — lifted from a bash
+    `# or` — and a title carries 10x weight in the ranking.
+    """
+    in_fence = False
+    for line in body.splitlines():
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if (m := ANY_HEADING_RE.match(line)) and min_level <= len(m["hashes"]) <= max_level:
+            yield len(m["hashes"]), m["text"]
 
 # A section past this is split at paragraph boundaries. The Claude Code hooks
 # reference is a single 227 KB page; one chunk that size would swamp bm25's
