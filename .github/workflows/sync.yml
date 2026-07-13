@@ -6,11 +6,14 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    # The whole package, not a hand-listed subset. The list left out cli.py —
+    # which holds content_hash and the build itself — so a commit that changed
+    # how the index is fingerprinted never triggered a sync at all. A change that
+    # does not affect the index leaves content_hash identical and publishes
+    # nothing anyway, so the only cost of being broad here is one wasted build.
     paths:
       - "sources/**"
-      - "src/anydocs/ingest/**"
-      - "src/anydocs/chunk.py"
-      - "src/anydocs/index.py"
+      - "src/anydocs/**"
 
 permissions:
   contents: write
