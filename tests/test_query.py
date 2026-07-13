@@ -116,6 +116,22 @@ def test_dropped_terms_flags_unsearchable_words(query, expected):
     assert dropped_terms(query) == expected
 
 
+def test_unknown_source_is_refused_not_silently_empty(monkeypatch):
+    """Filtering to a source that does not exist used to return "no matches",
+    which reads as "the docs don't cover this" — so a model that guessed
+    `claude` for `claude-code` would confidently report hooks are undocumented.
+    """
+    from anydocs import server
+
+    monkeypatch.setattr(server, "known_sources", lambda: ["claude-code", "codex"])
+    monkeypatch.setattr(server, "enabled_sources", lambda: [])
+
+    assert server.scope_for("claude-code") == ["claude-code"]
+    assert server.scope_for(None) is None
+    with pytest.raises(ValueError, match="unknown source 'claude'.*claude-code, codex"):
+        server.scope_for("claude")
+
+
 def test_chunker_ignores_headings_inside_code_fences():
     page = Page(
         source="s", path="p", url="u", title="T", description="",

@@ -47,6 +47,52 @@ def enabled_sources() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()] if raw else []
 
 
+def known_sources() -> list[str]:
+    ids = [r["id"] for r in db().execute("SELECT id FROM sources ORDER BY id")]
+    scope = enabled_sources()
+    return [i for i in ids if not scope or i in scope]
+
+
+def scope_for(source: str | None) -> list[str] | None:
+    """Resolve the `source` filter, refusing a name that does not exist.
+
+    A wrong name must not pass quietly. Filtering to an unknown source used to
+    return "no matches", which reads as "the docs don't cover this" — so a model
+    that guessed `claude` instead of `claude-code` would confidently report that
+    Claude Code has no hooks documentation.
+    """
+    if source is None:
+        return enabled_sources() or None
+    known = known_sources()
+    if source not in known:
+        raise ValueError(f"unknown source {source!r}. Available: {', '.join(known)}")
+    return [source]
+
+
+def annotate_source_params() -> None:
+    """Put the source catalogue into the tool schemas themselves.
+
+    Otherwise `source` is a bare optional string and the model has no way to
+    know which names are valid without spending a call on list_sources first —
+    or guessing, which is how it gets a confident wrong answer.
+    """
+    rows = db().execute("SELECT id, title FROM sources ORDER BY id").fetchall()
+    scope = enabled_sources()
+    rows = [r for r in rows if not scope or r["id"] in scope]
+    ids = [r["id"] for r in rows]
+    catalog = ", ".join(f"{r['id']} ({r['title']})" for r in rows)
+
+    for tool in mcp._tool_manager._tools.values():
+        prop = tool.parameters.get("properties", {}).get("source")
+        if prop is None:
+            continue
+        # The parameter is `str` on list_pages and `str | None` elsewhere.
+        target = next((b for b in prop.get("anyOf", []) if b.get("type") == "string"), prop)
+        target["enum"] = ids
+        prop["description"] = f"One of: {catalog}"
+        tool.description = f"{tool.description}\n\nIndexed sources: {catalog}."
+
+
 def resolve(path: str, source: str | None) -> tuple[str, str]:
     """Accept either ("claude-code/en/hooks", None) or ("en/hooks", "claude-code").
 
@@ -54,6 +100,7 @@ def resolve(path: str, source: str | None) -> tuple[str, str]:
     several corpora at once.
     """
     if source:
+        scope_for(source)  # an unknown name must say so, not report a missing page
         return source, path.removeprefix(f"{source}/")
     head, _, rest = path.partition("/")
     if rest and db().execute("SELECT 1 FROM sources WHERE id=?", (head,)).fetchone():
@@ -86,8 +133,13 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     """Search the documentation. Returns ranked snippets, not full pages.
 
     Use this first for any question about a documented tool. Follow up with
-    read_doc on the paths it returns. Omit `source` to search every doc set at
-    once; pass it (e.g. "claude-code") to narrow.
+    read_doc on the paths it returns.
+
+    **Pass `source` whenever the question names one product.** These doc sets
+    cover the same ground in different words, so an unfiltered search spends
+    slots on the wrong products: a question about Claude Code hooks will also
+    return Cursor's and Codex's. Omit `source` only to compare products, or when
+    you genuinely do not know which one holds the answer.
 
     **Query in English.** The indexed docs are English and matching is lexical,
     so a question in another language finds nothing — translate it to English
@@ -97,8 +149,8 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     `PreToolUse` or `--flag-name` search fine here, but there is no fuzzy
     matching, so a typo finds nothing and a literal regex is a job for grep_docs.
     """
-    scope = [source] if source else enabled_sources()
-    rows, expr = search(db(), query, sources=scope or None, limit=limit)
+    scope = scope_for(source)
+    rows, expr = search(db(), query, sources=scope, limit=limit)
     dropped = dropped_terms(query)
 
     if not rows:
@@ -220,15 +272,16 @@ def grep_docs(pattern: str, source: str | None = None, ignore_case: bool = True)
     """Regex search over the raw documentation markdown.
 
     The escape hatch for what BM25 cannot match: exact flags, config keys, code
-    identifiers. `pattern` is a Python regex. Scope with `source` to keep the
-    output small.
+    identifiers. `pattern` is a Python regex. Pass `source` when the question is
+    about one product — matches are capped, so an unscoped grep can fill its
+    budget with the wrong doc set.
     """
     try:
         rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
     except re.error as exc:
         raise ValueError(f"bad regex {pattern!r}: {exc}") from None
 
-    scope = [source] if source else enabled_sources()
+    scope = scope_for(source)
     sql = "SELECT source, path, body FROM pages"
     params: list = []
     if scope:
@@ -262,6 +315,7 @@ def grep_docs(pattern: str, source: str | None = None, ignore_case: bool = True)
 @mcp.tool()
 def list_pages(source: str, prefix: str = "") -> str:
     """List a source's pages with their descriptions — a cheap map of what exists."""
+    scope_for(source)  # reject an unknown name instead of returning an empty map
     rows = db().execute(
         "SELECT path, title, description FROM pages "
         "WHERE source=? AND path LIKE ? ORDER BY path",
@@ -279,6 +333,7 @@ def list_pages(source: str, prefix: str = "") -> str:
 def main() -> int:
     try:
         ensure_index()
+        annotate_source_params()
     except Exception as exc:  # noqa: BLE001
         print(f"anydocs: cannot open index: {exc}", file=sys.stderr)
         return 1
