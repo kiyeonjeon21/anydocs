@@ -44,6 +44,10 @@ STOP = frozenset(
 )
 
 
+NOT_CONTRACTION = re.compile(r"n[’']t\b")
+CONTRACTION = re.compile(r"[’']\w{1,2}\b")
+
+
 def query_units(raw: str) -> list[str]:
     """Split user text into quoted FTS5 units.
 
@@ -55,8 +59,21 @@ def query_units(raw: str) -> list[str]:
     A word yielding several tokens was glued by `-`/`_`/`.`/`/` — i.e. it is a
     symbol — so it becomes an adjacency phrase: `--dangerously-skip-permissions`
     -> `"dangerously skip permissions"`, which matches the flag as written.
+
+    **An apostrophe is not glue.** It took the same path and it should not have:
+    `Where's` split to `["Where", "s"]` and became the phrase `"Where s"` — two
+    words adjacent in that order, which appears in no document ever written. So it
+    matched nothing, and `unmatched_terms` dutifully reported that nothing matched
+    it, and the caller got a NOTE naming three pages where `Where s` supposedly
+    lives. Over 500 natural-language questions this was **4 of the 25 rescues that
+    fired**: pure noise, manufactured by punctuation.
+
+    Contractions are stripped to their stem first, and the stem is usually a
+    stopword anyway — `Where's` -> `Where`, `don't` -> `do`, `isn't` -> `is` — so
+    the unit disappears entirely, which is what should have happened all along.
     """
-    words = [(w, TERM.findall(w)) for w in raw.split()]
+    text = CONTRACTION.sub("", NOT_CONTRACTION.sub("", raw))
+    words = [(w, TERM.findall(w)) for w in text.split()]
     kept = [ts for _, ts in words if ts and not (len(ts) == 1 and ts[0].lower() in STOP)]
     if not kept:  # a query made only of stopwords: keep them rather than match nothing
         kept = [ts for _, ts in words if ts]

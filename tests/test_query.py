@@ -396,3 +396,21 @@ def test_outlinks_put_see_also_first():
     rows, total = outlinks(conn, "s", "from", limit=2)
     assert [r["path"] for r in rows] == ["seealso", "prose-a"]
     assert total == 3
+
+
+def test_an_apostrophe_is_not_glue():
+    """`Where's` became the phrase "Where s" — two words adjacent in that order,
+    which is in no document ever written. It matched nothing, so unmatched_terms
+    reported it missing, so the caller got a NOTE about where `Where s` lives.
+    Four of the 25 rescues that fired over 500 questions were this."""
+    assert query_units("Where's the SDK doc") == ['"SDK"', '"doc"']
+    assert query_units("What's the difference") == ['"difference"']
+    assert query_units("hasn't it shipped") == ['"has"', '"shipped"']
+    assert query_units("don't ask mode") == ['"ask"', '"mode"']
+
+
+def test_real_glue_still_makes_a_phrase():
+    """The apostrophe fix must not touch the symbols the phrase form exists for."""
+    assert query_units("--dangerously-skip-permissions") == ['"dangerously skip permissions"']
+    assert query_units("Bash(git:*)") == ['"Bash git"']
+    assert query_units("CLAUDE.md") == ['"CLAUDE md"']
