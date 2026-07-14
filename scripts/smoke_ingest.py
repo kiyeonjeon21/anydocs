@@ -30,6 +30,16 @@ async def main() -> int:
         )
         for err in errors[:3]:
             print(f"  ! {err}")
+        if errors:
+            failed = True
+        if not pages:
+            print("  !! source returned zero pages")
+            failed = True
+        if source.expect_pages and not (
+            source.expect_pages * 0.8 <= len(pages) <= source.expect_pages * 1.25
+        ):
+            print(f"  !! expected about {source.expect_pages} pages")
+            failed = True
         if html:
             print(f"  !! HTML leaked into corpus: {html[:3]}")
             failed = True

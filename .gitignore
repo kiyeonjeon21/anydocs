@@ -6,3 +6,4 @@ __pycache__/
 .claude/dist/
 media/
 .claude/settings.json
+.codex/config.toml

@@ -24,8 +24,48 @@ alive. The whole index is ~7 MB.
 
 ## Install
 
-Add this to `.mcp.json`. Nothing to install first — `uvx` fetches the server, and
-the server fetches the index on first run.
+### Codex
+
+Codex reads MCP servers from `~/.codex/config.toml` or, for a trusted project,
+`.codex/config.toml`. Add it globally with the CLI:
+
+```bash
+codex mcp add anydocs -- \
+  uvx --from git+https://github.com/kiyeonjeon21/anydocs anydocs
+codex mcp list
+```
+
+Or use project configuration. The longer startup timeout covers the first cold
+`uvx` install and index download; `required` makes a broken server fail loudly.
+
+```toml
+[mcp_servers.anydocs]
+command = "uvx"
+args = [
+  "--from",
+  "git+https://github.com/kiyeonjeon21/anydocs",
+  "anydocs",
+]
+startup_timeout_sec = 120
+required = true
+
+[mcp_servers.anydocs.env]
+ANYDOCS_SOURCES = "codex"
+```
+
+Restart Codex after changing configuration. To make tool selection reliable,
+put this in the project's `AGENTS.md`:
+
+```md
+When anydocs MCP is available, use search_docs with the product's source and
+then read_doc before answering questions about that product's documentation.
+```
+
+### Clients using `.mcp.json`
+
+For clients that support `.mcp.json`, use the following. Nothing needs to be
+installed first: `uvx` fetches the server, and the server fetches the index on
+first run.
 
 ```json
 {
@@ -45,7 +85,8 @@ the server fetches the index on first run.
 ## Scoping a project to the docs it uses
 
 `ANYDOCS_SOURCES` limits the server to the sources you name. The rest disappear —
-from `list_sources`, from the `source` enum the model sees, and from every search.
+from `list_sources`, from the `source` enum the model sees, and from every tool,
+including direct `read_doc` calls.
 
 Worth doing. These doc sets describe the same ideas in different words, so on a
 Claude Code repo an unfiltered search for `hook events` hands 3 of its 5 slots to
@@ -67,6 +108,13 @@ Cursor and xAI.
     }
   }
 }
+```
+
+In Codex config, the equivalent is:
+
+```toml
+[mcp_servers.anydocs.env]
+ANYDOCS_SOURCES = "claude-code,codex"
 ```
 
 Available: `claude-code`, `codex`, `cursor`, `opencode`, `xai`. A name that is not

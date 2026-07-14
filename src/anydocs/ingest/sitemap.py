@@ -29,7 +29,7 @@ async def ingest(source: Source) -> tuple[list[Page], list[str]]:
     for md_url, page_url in md_urls.items():
         body = fetched[md_url]
         if isinstance(body, Exception):
-            errors.append(f"{md_url}: {body}")
+            errors.append(f"{md_url}: {type(body).__name__}: {body}")
             continue
         body = clean_body(body)
         path = slug_path(page_url, source.base_url)

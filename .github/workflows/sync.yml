@@ -32,7 +32,35 @@ jobs:
           enable-cache: true
 
       - name: Build index
+        id: build
+        continue-on-error: true
         run: uv run anydocs-build
+
+      - name: Surface and enforce ingest health
+        if: always()
+        run: |
+          if [ ! -f build/manifest.json ]; then
+            echo "::error title=ingest::Build produced no manifest."
+            exit 1
+          fi
+          jq -r '.warnings[]?' build/manifest.json | while read -r w; do
+            echo "::warning title=ingest::$w"
+          done
+          jq -r '.errors[]?' build/manifest.json | while read -r e; do
+            echo "::error title=ingest::$e"
+          done
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            exit 1
+          fi
+          jq -e '.healthy == true' build/manifest.json > /dev/null
+
+      - name: Gate retrieval quality
+        run: uv run python scripts/eval_search.py --verbose
+
+      - name: Verify anchors against the live sites
+        # A wrong heading slug is a link that quietly lands on the wrong place;
+        # nothing else in the pipeline would ever notice, so check it here.
+        run: uv run python scripts/verify_anchors.py
 
       - name: Compare against the published index
         id: diff
@@ -52,29 +80,31 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Surface ingest warnings
-        run: |
-          jq -r '.warnings[]?' build/manifest.json | while read -r w; do
-            echo "::warning title=ingest::$w"
-          done
-          # A source that vanished entirely is a site redesign, not a blip.
-          jq -e '.sources | length >= 1' build/manifest.json > /dev/null
-
-      - name: Verify anchors against the live sites
-        # A wrong heading slug is a link that quietly lands on the wrong place;
-        # nothing else in the pipeline would ever notice, so check it here.
-        run: uv run python scripts/verify_anchors.py
-
       - name: Publish
         if: steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          artifact=$(jq -r .artifact_name build/manifest.json)
           notes=$(jq -r '"Synced \(.synced_at)\n\n" + (.sources | to_entries
                     | map("- \(.key): \(.value.pages) pages, \(.value.chunks) chunks")
                     | join("\n"))' build/manifest.json)
-          gh release delete "$RELEASE_TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$RELEASE_TAG" \
-            --title "Docs index" \
-            --notes "$notes" \
-            build/anydocs-index.tar.zst build/manifest.json
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "Docs index" --notes "$notes"
+          fi
+
+          # Upload immutable content first. The manifest is the pointer and must
+          # switch last, after every asset it can name is fully available.
+          gh release upload "$RELEASE_TAG" "build/$artifact" --clobber
+          gh release upload "$RELEASE_TAG" build/anydocs-index.tar.zst --clobber
+          gh release upload "$RELEASE_TAG" build/manifest.json --clobber
+          gh release edit "$RELEASE_TAG" --title "Docs index" --notes "$notes"
+
+          # Keep current + previous immutable assets so a client that fetched the
+          # prior manifest just before the switch can still finish its download.
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            --jq '[.assets[] | select(.name | startswith("anydocs-index-") and endswith(".tar.zst"))]
+                  | sort_by(.created_at) | reverse | .[2:][]? | .id' \
+            | while read -r asset_id; do
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+              done

@@ -92,11 +92,11 @@ def anchor_slug(heading: str, style: str = "collapse") -> str:
 TABLE_ROW = re.compile(r"^\s*\|")
 
 
-def _pack(blocks: list[str], sep: str, prefix: str = "") -> list[str]:
-    """Greedily fill chunks up to MAX_CHUNK, never splitting a block."""
+def _pack(blocks: list[str], sep: str, prefix: str = "", limit: int = MAX_CHUNK) -> list[str]:
+    """Greedily fill parts up to `limit`, never splitting a block."""
     parts, buf = [], ""
     for block in blocks:
-        if buf and len(prefix) + len(buf) + len(sep) + len(block) > MAX_CHUNK:
+        if buf and len(prefix) + len(buf) + len(sep) + len(block) > limit:
             parts.append(prefix + buf)
             buf = block
         else:
@@ -106,7 +106,7 @@ def _pack(blocks: list[str], sep: str, prefix: str = "") -> list[str]:
     return parts
 
 
-def _split_block(block: str) -> list[str]:
+def split_block(block: str, limit: int = MAX_CHUNK) -> list[str]:
     """Split one over-long paragraph.
 
     In practice this is always a big markdown table — the reference pages are
@@ -120,16 +120,22 @@ def _split_block(block: str) -> list[str]:
     if len(lines) >= 2 and TABLE_ROW.match(lines[0]) and set(lines[1].strip()) <= set("|-: "):
         header = "\n".join(lines[:2]) + "\n"
         lines = lines[2:]
-    return _pack([ln[:MAX_CHUNK] for ln in lines], "\n", header)
+    return _pack([ln[:limit] for ln in lines], "\n", header, limit)
 
 
-def _split_long(body: str) -> list[str]:
-    if len(body) <= MAX_CHUNK:
+def split_long(body: str, limit: int = MAX_CHUNK) -> list[str]:
+    """Break a body into parts of at most `limit`, at the safest boundary available.
+
+    `limit` is a parameter because read_doc serves the same tables back to a
+    caller, and there it wants parts of ~20 KB, not the 4 KB the ranker wants.
+    Defaulted, so the indexer's output is byte-identical.
+    """
+    if len(body) <= limit:
         return [body]
     blocks: list[str] = []
     for para in body.split("\n\n"):
-        blocks.extend([para] if len(para) <= MAX_CHUNK else _split_block(para))
-    return _pack(blocks, "\n\n")
+        blocks.extend([para] if len(para) <= limit else split_block(para, limit))
+    return _pack(blocks, "\n\n", "", limit)
 
 
 def chunk_page(page: Page, style: str = "collapse") -> list[Chunk]:
@@ -169,7 +175,7 @@ def chunk_page(page: Page, style: str = "collapse") -> list[Chunk]:
             continue
         tail = trail.get(anchor, heading)
         breadcrumb = f"{page.title} › {tail}" if tail else page.title
-        for part in _split_long(body):
+        for part in split_long(body):
             chunks.append(
                 Chunk(
                     source=page.source,

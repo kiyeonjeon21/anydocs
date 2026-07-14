@@ -5,12 +5,15 @@ import os
 import re
 import sqlite3
 import sys
+from collections import Counter
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.tools import Tool
+from mcp.types import ToolAnnotations
 
 from anydocs.artifact import ensure_index
 from anydocs.index import connect
-from anydocs.chunk import iter_headings
+from anydocs.chunk import ANY_HEADING_RE, FENCE_RE, iter_headings, split_long
 from anydocs.query import (
     clean_snippet,
     dropped_terms,
@@ -26,6 +29,9 @@ from anydocs.query import (
 # comes to 121 KB on its own, which blew the caller's context just the same.
 BIG_PAGE = 40_000
 BIG_SECTION = 20_000
+# Prose kept above an outline, so the caller gets the paragraph that explains the
+# list and not just the names. Cut at a line boundary, and said out loud.
+OUTLINE_INTRO = 2_000
 
 # Pages to name per rescued term, and cross-references to list under a page.
 # read_doc is already returning a whole page, so a few lines of footer are free;
@@ -34,6 +40,13 @@ RESCUE_MAX = 3
 OUTLINK_MAX = 8
 OUTLINK_DESC = 90
 
+# list_pages called itself "a cheap map" and cost 7,600 tokens on claude-code —
+# 15x the whole search budget, from the one tool in this server with no cap at
+# all. The descriptions are almost the entire bill, so past a certain size it
+# lists paths only: that is still a map, and it is the map the caller asked for.
+LIST_DESCRIPTIONS_UPTO = 40
+LIST_MAX = 200
+
 # grep exists to be cheap and exact. Uncapped it would reproduce the very
 # token-burn failure this server was built to avoid. Scanning every page's body
 # with Python's re takes ~25-90 ms over the whole corpus, so there is no reason
@@ -41,8 +54,20 @@ OUTLINK_DESC = 90
 GREP_MAX_MATCHES = 40
 GREP_PER_PAGE = 3
 GREP_MAX_COLS = 200
+SEARCH_MAX_RESULTS = 8
 
-mcp = FastMCP("anydocs")
+SERVER_INSTRUCTIONS = """Search indexed product documentation with search_docs before
+answering documentation questions. Pass source when the product is known, use concise
+English keywords, then call read_doc on the relevant paths. Treat WARNING and NOTE as
+incomplete evidence: follow rescued and related pages before concluding that a feature
+does not exist. Use grep_docs only for exact regex lookup after search_docs."""
+
+READ_ONLY_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
 
 _conn: sqlite3.Connection | None = None
 _enabled: list[str] = []
@@ -68,6 +93,10 @@ def known_sources() -> list[str]:
     return [i for i in ids if not scope or i in scope]
 
 
+def indexed_sources() -> list[str]:
+    return [r["id"] for r in db().execute("SELECT id FROM sources ORDER BY id")]
+
+
 def scope_for(source: str | None) -> list[str] | None:
     """Resolve the `source` filter, refusing a name that does not exist.
 
@@ -78,34 +107,48 @@ def scope_for(source: str | None) -> list[str] | None:
     """
     if source is None:
         return enabled_sources() or None
+    indexed = indexed_sources()
+    if source not in indexed:
+        raise ValueError(f"unknown source {source!r}. Available: {', '.join(known_sources())}")
     known = known_sources()
     if source not in known:
-        raise ValueError(f"unknown source {source!r}. Available: {', '.join(known)}")
+        raise ValueError(
+            f"source {source!r} is disabled by ANYDOCS_SOURCES. "
+            f"Available: {', '.join(known)}"
+        )
     return [source]
 
 
-def annotate_source_params() -> None:
-    """Put the source catalogue into the tool schemas themselves.
-
-    Otherwise `source` is a bare optional string and the model has no way to
-    know which names are valid without spending a call on list_sources first —
-    or guessing, which is how it gets a confident wrong answer.
-    """
+def tool_models() -> list[Tool]:
+    """Build public FastMCP Tool models with runtime source/limit schemas."""
     rows = db().execute("SELECT id, title FROM sources ORDER BY id").fetchall()
     scope = enabled_sources()
     rows = [r for r in rows if not scope or r["id"] in scope]
     ids = [r["id"] for r in rows]
     catalog = ", ".join(f"{r['id']} ({r['title']})" for r in rows)
 
-    for tool in mcp._tool_manager._tools.values():
+    tools = []
+    for fn in TOOL_FUNCTIONS:
+        tool = Tool.from_function(fn, annotations=READ_ONLY_ANNOTATIONS)
         prop = tool.parameters.get("properties", {}).get("source")
-        if prop is None:
-            continue
-        # The parameter is `str` on list_pages and `str | None` elsewhere.
-        target = next((b for b in prop.get("anyOf", []) if b.get("type") == "string"), prop)
-        target["enum"] = ids
-        prop["description"] = f"One of: {catalog}"
-        tool.description = f"{tool.description}\n\nIndexed sources: {catalog}."
+        if prop is not None:
+            # The parameter is `str` on list_pages and `str | None` elsewhere.
+            target = next(
+                (b for b in prop.get("anyOf", []) if b.get("type") == "string"), prop
+            )
+            target["enum"] = ids
+            prop["description"] = f"One of: {catalog}"
+            tool.description = f"{tool.description}\n\nIndexed sources: {catalog}."
+        if tool.name == "search_docs":
+            limit = tool.parameters["properties"]["limit"]
+            limit["minimum"] = 1
+            limit["maximum"] = SEARCH_MAX_RESULTS
+        tools.append(tool)
+    return tools
+
+
+def build_mcp() -> FastMCP:
+    return FastMCP("anydocs", instructions=SERVER_INSTRUCTIONS, tools=tool_models())
 
 
 def resolve(path: str, source: str | None) -> tuple[str, str]:
@@ -116,11 +159,22 @@ def resolve(path: str, source: str | None) -> tuple[str, str]:
     """
     if source:
         scope_for(source)  # an unknown name must say so, not report a missing page
+        head, _, rest = path.partition("/")
+        if rest and head in indexed_sources() and head != source:
+            raise ValueError(
+                f"path {path!r} names source {head!r}, but source={source!r} was requested"
+            )
         return source, path.removeprefix(f"{source}/")
     head, _, rest = path.partition("/")
-    if rest and db().execute("SELECT 1 FROM sources WHERE id=?", (head,)).fetchone():
+    if rest and head in indexed_sources():
+        scope_for(head)
         return head, rest
-    rows = db().execute("SELECT source FROM pages WHERE path=?", (path,)).fetchall()
+    visible = known_sources()
+    placeholders = ",".join("?" * len(visible))
+    rows = db().execute(
+        f"SELECT source FROM pages WHERE path=? AND source IN ({placeholders})",
+        [path, *visible],
+    ).fetchall()
     if len(rows) == 1:
         return rows[0]["source"], path
     if not rows:
@@ -129,7 +183,6 @@ def resolve(path: str, source: str | None) -> tuple[str, str]:
     raise ValueError(f"{path!r} is ambiguous across sources: {found}")
 
 
-@mcp.tool()
 def list_sources() -> str:
     """List the documentation sets in the index, with page counts and freshness."""
     rows = db().execute("SELECT * FROM sources ORDER BY id").fetchall()
@@ -143,7 +196,6 @@ def list_sources() -> str:
     return "\n".join(out) or "index is empty"
 
 
-@mcp.tool()
 def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     """Search the documentation. Returns ranked snippets, not full pages.
 
@@ -171,8 +223,13 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     dropped. Do not reach for grep_docs just because the query contains one.
     There is no fuzzy matching, so a typo finds nothing.
     """
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= SEARCH_MAX_RESULTS:
+        raise ValueError(f"limit must be an integer from 1 to {SEARCH_MAX_RESULTS}")
     scope = scope_for(source)
-    rows, expr = search(db(), query, sources=scope, limit=limit)
+    try:
+        rows, expr = search(db(), query, sources=scope, limit=limit)
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"index query failed: {exc}") from exc
     dropped = dropped_terms(query)
 
     if not rows:
@@ -194,7 +251,10 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
             f"so these results answer only {expr}. Re-search in English.",
             "",
         ]
-    lines += rescue_block(query, rows, scope)
+    try:
+        lines += rescue_block(query, rows, scope)
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"index query failed: {exc}") from exc
     lines += [f"{len(rows)} results (matched: {expr})", ""]
     for r in rows:
         anchor = f"#{r['anchor']}" if r["anchor"] else ""
@@ -242,13 +302,21 @@ def rescue_block(query: str, rows: list[sqlite3.Row], scope: list[str] | None) -
     return [*out, ""] if out else []
 
 
-@mcp.tool()
-def read_doc(path: str, source: str | None = None, section: str | None = None) -> str:
+def read_doc(
+    path: str, source: str | None = None, section: str | None = None, part: int = 1
+) -> str:
     """Read a documentation page, or one section of it.
 
     `path` is what search_docs returns, e.g. "claude-code/en/hooks". Pass
-    `section` (a heading or its anchor) to read just that part — required for
-    very large pages, which otherwise return an outline to choose from.
+    `section` (a heading or its anchor, at any depth) to read just that part —
+    required for very large pages, which otherwise return an outline to choose
+    from.
+
+    A section that is one huge table — `en/settings` § `Available settings`,
+    `en/env-vars` § `Variables` — has no subheadings to outline, so it comes back
+    in parts, each carrying the table's header row. The reply names the part
+    count; pass `part=2`, `part=3`… for the rest, or use grep_docs to pull a
+    single entry out of it.
 
     The **Related pages** footer is the page's own outgoing cross-references —
     what its authors thought you should read next. Follow them when the question
@@ -268,23 +336,70 @@ def read_doc(path: str, source: str | None = None, section: str | None = None) -
     foot = outlink_footer(src, rel)
 
     if section:
-        part = extract_section(body, section)
-        if part is None:
+        found = extract_section(body, section)
+        if found is None:
             heads = "\n".join(f"  - {h}" for h in headings(body))
             raise ValueError(f"no section {section!r} in {src}/{rel}. Sections:\n{heads}")
-        if len(part) > BIG_SECTION:
-            # Outline the children, not the section itself, and keep its own
-            # heading line so the caller still knows where they are.
-            own_heading, _, rest = part.partition("\n")
-            part = f"{own_heading}\n" + _outline(rest, "This section", lead_in=True)
-        return f"{head}\n{part}\n{foot}"
+        text, level, also = found
+        note = ""
+        if also:
+            # Two headings on one page slugging to the same anchor. Returning the
+            # first silently is how a caller reads confidently wrong text.
+            note = (
+                f"\nNOTE: {section!r} also matches {also!r} on this page. This is the "
+                f"first of the two — pass the other heading verbatim to read it instead.\n"
+            )
+        if len(text) > BIG_SECTION:
+            text = _shrink(text, level, part)
+        elif part != 1:
+            # Silently ignoring it would hand back part 1 while the caller
+            # believed they were reading part 2.
+            raise ValueError(
+                f"section {section!r} of {src}/{rel} is {len(text) // 1000} KB and is "
+                f"returned whole — there is no part {part}. Drop part=."
+            )
+        return f"{head}{note}\n{text}\n{foot}"
+
+    if part != 1:
+        raise ValueError("part= applies to a section; pass section= as well")
 
     if len(body) > BIG_PAGE:
         body = (
             f"# {row['title']}\n\n{row['description']}\n\n"
-            + _outline(body, "This page")
+            + _outline(body, 1, "This page")
         )
     return f"{head}\n{body}\n{foot}"
+
+
+def _shrink(text: str, level: int, part: int) -> str:
+    """An over-long section, made reachable — by outline if it has children, by
+    pagination if it does not.
+
+    The outline path used to look only for H2/H3 children, so an H3 section like
+    `en/hooks` § `PreToolUse` — 21 KB, fourteen H4 children — offered a menu of
+    nothing, over the top of a table cut mid-row. And 13 sections have no
+    subheadings at *any* level, because they are one enormous table: the settings
+    reference, the env-var reference, every slash command. For those an outline
+    is not a poor answer, it is the wrong question, and read_doc simply could not
+    return them.
+    """
+    own_heading, _, rest = text.partition("\n")
+    subs = _outline(rest, level, "This section", lead_in=True)
+    if subs is not None:
+        return f"{own_heading}\n{subs}"
+
+    parts = split_long(rest.strip(), BIG_SECTION)
+    if not 1 <= part <= len(parts):
+        raise ValueError(
+            f"part {part} does not exist; this section has {len(parts)} parts (1-{len(parts)})"
+        )
+    return (
+        f"{own_heading}\n\n{parts[part - 1]}\n\n"
+        f"This section is a {len(rest) // 1000} KB table with no subheadings — "
+        f"part {part} of {len(parts)}. Re-call read_doc with the same section= and "
+        f"part={part + 1 if part < len(parts) else 1} for another, or use grep_docs "
+        f"to pull out a single entry."
+    )
 
 
 def outlink_footer(src: str, rel: str) -> str:
@@ -302,10 +417,11 @@ def outlink_footer(src: str, rel: str) -> str:
     would hide it from exactly the caller who read straight to the part they were
     pointed at.
     """
-    rows = outlinks(db(), src, rel, limit=OUTLINK_MAX)
+    rows, total = outlinks(db(), src, rel, limit=OUTLINK_MAX)
     if not rows:
         return ""
-    out = ["", "Related pages (cross-referenced by this one):"]
+    shown = f"showing {len(rows)} of {total}" if total > len(rows) else f"{total}"
+    out = ["", f"Related pages (cross-referenced by this one — {shown}):"]
     for r in rows:
         desc = " ".join((r["description"] or r["title"] or "").split())
         if len(desc) > OUTLINK_DESC:
@@ -314,27 +430,32 @@ def outlink_footer(src: str, rel: str) -> str:
     return "\n".join(out)
 
 
-def _outline(text: str, what: str, *, lead_in: bool = False) -> str:
-    """Describe an over-long chunk of markdown instead of returning it.
+def _outline(text: str, level: int, what: str, *, lead_in: bool = False) -> str | None:
+    """List the headings one level below `level`. None when there are none.
+
+    The level matters: children of an H3 are H4s, and looking only for H2/H3 —
+    which is what this did — finds nothing under `PreToolUse` and offers the
+    caller an empty menu.
 
     With `lead_in`, keep the prose before the first subheading: for a section
     like `Hook events` that is the paragraph actually explaining the list, and
     dropping it would leave the caller with nothing but names.
     """
-    subs = headings(text)
+    subs = [t for lvl, t in iter_headings(text, level + 1, 6) if lvl == level + 1]
+    if not subs:
+        return None
     out = ""
     if lead_in:
-        first = HEADING_RE.search(text)
+        first = re.search(rf"^#{{{level + 1}}}\s", text, re.MULTILINE)
         intro = (text[: first.start()] if first else text).strip()
-        out += f"\n{intro[:2000]}\n"
+        if len(intro) > OUTLINE_INTRO:
+            intro = intro[:OUTLINE_INTRO].rsplit("\n", 1)[0] + "\n…(cut)"
+        out += f"\n{intro}\n"
     listing = "\n".join(f"  - {h}" for h in subs)
     return (
         f"{out}\n{what} is {len(text) // 1000} KB — too large to return whole.\n"
         f"Re-call read_doc with section=<one of these>:\n\n{listing}"
     )
-
-
-HEADING_RE = re.compile(r"^(#{2,3})\s+(.+?)\s*$", re.MULTILINE)
 
 
 def headings(body: str) -> list[str]:
@@ -343,26 +464,72 @@ def headings(body: str) -> list[str]:
     return [text for _, text in iter_headings(body, 2, 3)]
 
 
-def extract_section(body: str, wanted: str) -> str | None:
-    """Return a heading and everything under it, up to the next same-or-higher heading."""
+# Every spelling a heading's anchor could have. The server does not know the
+# source's slug_style — it is not in the shipped index — and it does not need to:
+# offer all three and keep whichever the caller used. Across the corpus this makes
+# only 4 headings out of 638 pages ambiguous, and all four are the same title in
+# two cases ("Project Rules" / "Project rules"), which read_doc now says out loud.
+SLUG_STYLES = ("collapse", "github", "verbatim")
+
+
+def _spellings(heading: str) -> set[str]:
     from anydocs.chunk import anchor_slug
 
-    target = anchor_slug(wanted)
-    marks = list(HEADING_RE.finditer(body))
-    for i, m in enumerate(marks):
-        if anchor_slug(m.group(2)) != target:
-            continue
-        level = len(m.group(1))
-        end = len(body)
-        for nxt in marks[i + 1 :]:
-            if len(nxt.group(1)) <= level:
-                end = nxt.start()
-                break
-        return body[m.start() : end].strip()
-    return None
+    return {heading.strip().lower(), *(anchor_slug(heading, s) for s in SLUG_STYLES)}
 
 
-@mcp.tool()
+def extract_section(body: str, wanted: str) -> tuple[str, int, str] | None:
+    """Find a heading at any depth and return (text, level, colliding heading or "").
+
+    `wanted` may be the heading itself or its anchor in any site's slug style.
+    search_docs hands back the anchor as the *source site* spells it — opencode
+    slugs `Using opencode.json` to `using-opencodejson`, dropping the dot — and
+    re-slugging that with the default style finds nothing, so the caller was told
+    a section it had just been pointed at did not exist.
+    """
+    target = wanted.strip().lower().lstrip("#")
+    marks = [
+        (m, len(m["hashes"]), m["text"])
+        for m in _iter_heading_matches(body)
+    ]
+    hits = [i for i, (_, _, text) in enumerate(marks) if target in _spellings(text)]
+    if not hits:
+        return None
+
+    i, (m, level, _) = hits[0], marks[hits[0]]
+    end = len(body)
+    for nxt, nxt_level, _ in marks[i + 1 :]:
+        if nxt_level <= level:
+            end = nxt.start()
+            break
+    also = marks[hits[1]][2] if len(hits) > 1 else ""
+    return body[m.start() : end].strip(), level, also
+
+
+def _iter_heading_matches(body: str):
+    """ANY_HEADING_RE matches, fence-aware — iter_headings gives text, not offsets."""
+    pos, in_fence = 0, False
+    for line in body.splitlines(keepends=True):
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and (m := ANY_HEADING_RE.match(line)):
+            yield _Mark(m, pos)
+        pos += len(line)
+
+
+class _Mark:
+    """An ANY_HEADING_RE match, re-based onto the whole body."""
+
+    def __init__(self, m: re.Match, offset: int) -> None:
+        self._m, self._offset = m, offset
+
+    def __getitem__(self, key: str) -> str:
+        return self._m[key]
+
+    def start(self) -> int:
+        return self._offset + self._m.start()
+
+
 def grep_docs(pattern: str, source: str | None = None, ignore_case: bool = True) -> str:
     """Regex search over the raw documentation markdown. **Use search_docs first.**
 
@@ -392,15 +559,20 @@ def grep_docs(pattern: str, source: str | None = None, ignore_case: bool = True)
 
     hits, truncated = [], False
     for row in db().execute(sql, params):
-        per_page = 0
-        for lineno, line in enumerate(row["body"].splitlines(), 1):
-            if not rx.search(line):
-                continue
-            text = line.strip()[:GREP_MAX_COLS]
-            hits.append(f"{row['source']}/{row['path']}:{lineno}: {text}")
-            per_page += 1
-            if per_page >= GREP_PER_PAGE:
-                break  # one page cannot flood the result list
+        page = f"{row['source']}/{row['path']}"
+        found = [
+            (n, line.strip())
+            for n, line in enumerate(row["body"].splitlines(), 1)
+            if rx.search(line)
+        ]
+        for lineno, line in found[:GREP_PER_PAGE]:
+            text = line[:GREP_MAX_COLS] + ("…" if len(line) > GREP_MAX_COLS else "")
+            hits.append(f"{page}:{lineno}: {text}")
+        # One page cannot flood the list — but it must not be able to hide behind
+        # the cap either. `plugin` matches 52 lines of opencode/plugins and three
+        # were shown, with nothing to say the other 49 existed.
+        if len(found) > GREP_PER_PAGE:
+            hits.append(f"{page}: … {len(found) - GREP_PER_PAGE} more matches on this page")
         if len(hits) >= GREP_MAX_MATCHES:
             truncated = True
             break
@@ -413,9 +585,14 @@ def grep_docs(pattern: str, source: str | None = None, ignore_case: bool = True)
     return out
 
 
-@mcp.tool()
 def list_pages(source: str, prefix: str = "") -> str:
-    """List a source's pages with their descriptions — a cheap map of what exists."""
+    """List a source's pages — a cheap map of what exists.
+
+    Descriptions come with the listing while it is small. A large one is served
+    as paths only, with the directory prefixes and their page counts, because the
+    descriptions alone would cost more than fifteen searches. Pass `prefix` (one
+    of the ones it names) to narrow it and get the descriptions back.
+    """
     scope_for(source)  # reject an unknown name instead of returning an empty map
     rows = db().execute(
         "SELECT path, title, description FROM pages "
@@ -424,11 +601,35 @@ def list_pages(source: str, prefix: str = "") -> str:
     ).fetchall()
     if not rows:
         raise ValueError(f"no pages in {source!r} under {prefix!r}")
-    return "\n".join(
-        f"{source}/{r['path']}\n      {r['title']}"
-        + (f" — {r['description'][:110]}" if r["description"] else "")
+
+    if len(rows) <= LIST_DESCRIPTIONS_UPTO:
+        return "\n".join(
+            f"{source}/{r['path']}\n      {r['title']}"
+            + (f" — {trim(r['description'], 110)}" if r["description"] else "")
+            for r in rows
+        )
+
+    dirs = Counter(
+        r["path"].rsplit("/", 1)[0] + "/" if "/" in r["path"] else "(top level)"
         for r in rows
     )
+    shown = rows[:LIST_MAX]
+    out = [
+        f"{len(rows)} pages in {source!r}"
+        + (f" under {prefix!r}" if prefix else "")
+        + " — too many to describe. Paths only; pass prefix= for titles and descriptions.",
+        "",
+        "  " + "  ".join(f"{d} ({n})" for d, n in dirs.most_common()),
+        "",
+        *(f"{source}/{r['path']}" for r in shown),
+    ]
+    if len(rows) > LIST_MAX:
+        out.append(f"… and {len(rows) - LIST_MAX} more; narrow with prefix=")
+    return "\n".join(out)
+
+
+def trim(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
 
 
 def check_scope() -> None:
@@ -442,7 +643,7 @@ def check_scope() -> None:
     scope = enabled_sources()
     if not scope:
         return
-    known = [r["id"] for r in db().execute("SELECT id FROM sources ORDER BY id")]
+    known = indexed_sources()
     if unknown := [s for s in scope if s not in known]:
         raise ValueError(
             f"ANYDOCS_SOURCES names unknown sources: {', '.join(unknown)}. "
@@ -450,15 +651,18 @@ def check_scope() -> None:
         )
 
 
+TOOL_FUNCTIONS = (list_sources, search_docs, read_doc, grep_docs, list_pages)
+
+
 def main() -> int:
     try:
         ensure_index()
         check_scope()
-        annotate_source_params()
+        server = build_mcp()
     except Exception as exc:  # noqa: BLE001
         print(f"anydocs: {exc}", file=sys.stderr)
         return 1
-    mcp.run()
+    server.run()
     return 0
 
 

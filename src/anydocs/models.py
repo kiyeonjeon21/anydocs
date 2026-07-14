@@ -16,6 +16,9 @@ class Source:
     tags: list[str] = field(default_factory=list)
     base_url: str = ""
     page_suffix: str = ""
+    # Optional markdown host/prefix when the index's canonical page URLs redirect
+    # incorrectly. Paths still come from base_url; only body fetching uses this.
+    fetch_base_url: str = ""
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     delimiter: str = ""
