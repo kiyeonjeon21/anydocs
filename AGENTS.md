@@ -114,6 +114,7 @@ Re-deriving them costs a day each.
 | Suppressing a rescue by whether a page is *named* after the word (`path LIKE`) | The best of the five, and still 9/12: it silences `telemetry` and `ollama`, whose answers live on `en/env-vars` and `providers`. Losing 2 true rescues of 6 costs more than 4 false ones. |
 | Warning when the top hit's BM25 margin over the runner-up is small | Looks decisive on the auto set — margin ≥ 0.2 → hit@1 0.993, < 0.1 → 0.55 — and it is an artifact of the ruler. See below. |
 | Indexing `pages.description` as a fourth FTS field | It looks like a free win and it is a trap twice over. On the honest ruler it is worth **+1.8pp hit@1** — and on the auto set it reads as +10pp (0.876 → 0.976), because the auto set's *query is the description*. Indexing it **destroys the instrument**: 284 cases of eval, traded for 35 cases out of 1,956. |
+| **Any query-time signal that the eight rows are weak.** Four measured over 500 real questions, baseline hit@8 0.864 | None separates. **Per-row term coverage** (the best row's share of the query's terms) runs 0.79 → 0.89 across its whole range — the intuition is that OR scatters a bad query across rows that each match a different slice, and it is simply not true. **Top-row coverage**, same. **Union coverage — which is exactly the rescue's trigger — carries almost nothing**: 479 of 500 queries have every term covered somewhere, at the baseline hit rate. **BM25 margin** stayed dead, as the row below says it would. |
 | **Tightening the rescue's trigger to fire more** — testing the word against title/heading instead of the whole chunk | The obvious reading of "a caller routes on titles, so a word buried in a body never *reached* them", and it is a disaster: **291 fires over 500 questions, 246 of them at a caller who already had the answer.** It warns that `hook events list` does not contain `list` while handing back `en/hooks`. Content words live in bodies; that is what bodies are. `visible` (title + heading + the 200-char snippet the caller can actually see) is the principled version and it is no better — precision 0.023. Measured, all three, in `scripts/eval_rescue.py`. |
 | Raising `MIN_CHUNK` off the floor because it drops 369 sections | Almost all of what it drops is a JSX landing stub (`<CodexCliLanding />`). The real short sections it loses (`Vim editor mode`) are covered elsewhere in the corpus and still rank. Not a user-visible bug. Verify the claim before acting on it: a report that `PermissionBehavior` was unsearchable was simply wrong — it ranks first. |
 
@@ -161,6 +162,26 @@ Gold paths are matched **exactly**. They were once matched by substring, so
 `en/hooks` also "matched" `en/hooks-guide` — and a change was shipped, and had to
 be reverted, on numbers that instrument produced. If a result looks too good,
 suspect the ruler before the code.
+
+### An anchor miss is 59% not a miss. Size a problem before you fix it.
+
+`scripts/eval_served.py` shows a judge the question and the eight rows as
+`search_docs` renders them, **never the gold label**, and asks the only question
+that matters: could a developer answer from these? Of the 68 anchor-gold MISSES in
+500 questions — **SERVED 40 (59%)**, PARTIAL 19, **FAILED 9 (13%)**. `How do I set
+up a managed policy?` returns `en/admin-setup#decide-what-to-enforce` and is graded
+**wrong**, because that one link pointed at `en/memory`.
+
+So **counting anchor misses overstates the real failure rate by 8x** — 13.6% against
+a true 1.8%. Recall@8 is still the right ruler for *comparing* two rankers, because
+the noise is constant across them. It is **not** a count of failed callers, and it
+was being read as one: "sixteen rows are worth +4pp of recall" is true, and worth
+less than it sounds, because most of what those rows recover was already served.
+
+The judge wobbles a case or two per run (FAILED held at 9 across two); read the
+split as ±. ~70 model calls, so it is not in CI and it is not for A/B-ing a ranker.
+It is for finding out whether the thing you are about to spend a week on is 13% or
+2%.
 
 **The auto set scores ranking. It cannot score confidence.** Its query is the
 page's `description` — one long, distinctive sentence, which is nothing like the
@@ -244,11 +265,18 @@ HTTP 200 for every unknown path, so bodies are content-checked, not trusted.
   4 pages in 638. `read_doc` says so out loud, but the emitted link is still
   wrong. Fixing it properly means numbering in `chunk.py` — which is an index
   change, hence a republish, hence a `SCHEMA_VERSION` question.
-- **The silent weak result — half fixed, and the missing half is the trigger.**
-  Asked `limit which model an org member can select`, Cursor's docs return org
-  roles and spend limits, no NOTE — every word matched *something* — and the answer
-  is not in the eight. `rescue_term` only sees a word that reached *nothing*, so
-  the failure where every word reached the **wrong** thing is invisible.
+- **The silent weak result — real, and 1.8% of questions, not the 13% it looked
+  like.** Asked `limit which model an org member can select`, Cursor's docs return
+  org roles and spend limits, no NOTE — every word matched *something* — and the
+  answer is not in the eight. `rescue_term` only sees a word that reached
+  *nothing*, so the failure where every word reached the **wrong** thing is
+  invisible.
+
+  **Size it before you spend a week on it.** Counting anchor-gold misses says this
+  happens 13.6% of the time. A gold-blind judge says 59% of those misses are pages
+  that answer the question perfectly well and were graded wrong (`eval_served.py`).
+  The real rate is **9 in 500**. It is worth fixing and it is not an emergency, and
+  the difference between those two sentences is a week.
 
   The half that is fixed: **the caller can usually produce the missing name.**
   Closed-book, the model guessed "Model Allowlist? Allowed Models? *Model
@@ -256,30 +284,43 @@ HTTP 200 for every unknown path, so bodies are content-checked, not trusted.
   key and never used it, because nothing told it to. `search_docs` now says a
   search costs ~500 tokens and it should **budget for two**. No index change.
 
-  The half that is not: **whether a caller can judge "these rows do not cohere" is
-  unmeasured**, and the one signal that could tell it is broken —
+  The half that is not: **nothing can tell the caller the rows are weak.** Four
+  candidate signals are in the rejected table. The one that was supposed to do it is
+  the NOTE, and —
 
-- **The rescue NOTE cries wolf, and now there is a number for it: precision
-  0.048.** Over 500 natural-language questions (`scripts/eval_rescue.py`) it fires
-  21 times, is right **once**, and **18 of the 21 fire at a caller who already had
-  the answer in the eight rows.** It warns on `work`, `manage`, `using`,
-  `configure`, `integrating`, `difference` — grammatical filler that survives the
-  stoplist and carries no topic. The one thing it reliably rescues is a version
-  number (`2.1.114` → `en/changelog`).
+- **The rescue costs more than the disease it treats. Leave it alone.** Over 500
+  natural-language questions (`scripts/eval_rescue.py`, `scripts/eval_served.py`):
 
-  The whole sandbox fix rests on the caller *believing* the NOTE, and this is what
-  that belief is being spent on. **The rescue's trigger is the open problem, and
-  every reading of it that has been tried is in the rejected table.** On the hand
-  set — keyword queries, which is what `search_docs` asks callers to write — it
-  fires zero times and cry-wolfs zero times. The pathology is entirely in
-  natural-language phrasing.
+  | | per 500 questions |
+  | --- | --- |
+  | a caller is genuinely failed, silently (judge-confirmed) | **9 (1.8%)** |
+  | the NOTE fires | 21 (4.2%) |
+  | …**at a caller who already had the answer in the eight rows** | **18 (3.6%)** |
+  | …and catches one of the 9 real failures | **1** |
 
-  It is also still true that the trigger is **a function of `limit`**:
-  `unmatched_terms` looks for the word anywhere in the returned chunks, bodies
-  included, so more rows means more places for it to be buried and the warning
-  quietly switches off. `limit=3` fires a NOTE on the query above and names the
-  answer page first; `limit=8` says nothing. That is not a designed behaviour —
-  but do not "fix" it by tightening the test. See the rejected table.
+  It warns on `work`, `manage`, `using`, `configure`, `integrating`, `difference` —
+  grammatical filler that survives the stoplist and carries no topic. The one thing
+  it *reliably* rescues is a version number (`2.1.114` → `en/changelog`).
+
+  The cry-wolf count is the trustworthy one: "the gold was in the eight rows" is a
+  *positive* fact, so label noise cannot inflate it. Search demonstrably found the
+  page and the NOTE told the caller to go read three others.
+
+  **So do not try to fix the trigger, and do not chase the silent failure with it.**
+  Every reading of "this word did not reach the results" is in the rejected table,
+  the disease is 1.8%, and the cure already runs at 3.6%. On the hand set — keyword
+  queries, which is what `search_docs` asks callers to write — the NOTE fires zero
+  times and cry-wolfs zero times. **The whole pathology is in natural-language
+  phrasing**, and the founding case (`sandbox`, a distinctive noun in a keyword
+  query) still works. That is the shape it is good at; leave it there.
+
+  Two facts to keep in view if you come back to this. The trigger is **a function of
+  `limit`** — `unmatched_terms` looks for the word anywhere in the returned chunks,
+  bodies included, so more rows means more places for it to be buried and the
+  warning quietly switches off (`limit=3` fires on the query above and names the
+  answer page first; `limit=8` says nothing). And **nothing measured separates a
+  topic from a verb**: five suppressors and three trigger variants, all in the
+  rejected table. If you find a signal that does, this is where to spend it.
 
 ## Verify before committing
 
