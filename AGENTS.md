@@ -18,6 +18,38 @@ Keep this file to rules — the things a future session must not get wrong. The
 story of how each rule was found is in `git log`, where the commit messages run to
 forty lines and cost nothing to carry.
 
+## A mounted server the agent never calls is worth nothing
+
+Everything below is about making retrieval good. `scripts/eval_agent.py` measures
+whether any of it reaches a user, by running a real Claude Code — **WebFetch and
+WebSearch enabled in every arm**, because that is what the user already has — and
+grading the final answer blind against docs-verified keys.
+
+| | wrong answers | accuracy | wall | answered from memory |
+| --- | --- | --- | --- | --- |
+| Claude Code alone (n=80) | 26% | 0.63 | 51s | 2/80 |
+| \+ anydocs (n=80) | 20% | 0.70 | 44s | 2/80 |
+| \+ anydocs + the README's `AGENTS.md` line (n=60) | **6%** | **0.78** | **27s** | **0/60** |
+
+**Most of the value is in one line of prose, not in the index.** With the server
+mounted and nothing telling it to search, the agent sometimes just answers — asked
+for Claude Code's permission modes it replied in a *single turn*, named four, and
+missed `auto` and `dontAsk`, with the answer one search away. The instruction takes
+that to zero, and it is also *faster*, because one search beats three guesses at a
+docs URL.
+
+So: a lesson about how a caller should behave is worth nothing here. It has to reach
+`SERVER_INSTRUCTIONS`, the tool docstrings, or that README line. Those are the only
+things a user ever sees.
+
+Three claims died getting to this table, all n=1, all mine: *the model doesn't know*
+(give it WebFetch and it finds out), *it says 9 and there are 20* (there are **30** —
+I read the SDK's `HookEvent` type and generalised, which is the exact failure this
+tool exists to prevent), and *anydocs saves tokens* (end to end it does not; the
+500-token search is a rounding error beside the agent's own overhead). **The judge
+moves ~10pp between passes — take the mean of three, and quote the wrong-answer rate
+rather than accuracy.**
+
 ## The one number that matters
 
 **A search must stay around 500 tokens.** The obvious way to build a docs-search

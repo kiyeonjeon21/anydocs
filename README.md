@@ -16,11 +16,37 @@ artifact. The server downloads it and serves five tools:
 | `list_pages` | a source's pages and descriptions |
 
 **A search costs ~500 tokens.** Returning whole matched sections instead — the
-obvious way to build this — costs 10k+ for the same question. That gap is the
-reason anydocs exists.
+obvious way to build this — costs 10k+ for the same question. That is what makes
+it cheap enough to check *every time* instead of guessing.
 
 Everything runs locally: no API key, no network at query time, no service to keep
 alive. The whole index is ~7 MB.
+
+## Does it help? Measured.
+
+Ten questions about config surface that has changed recently — Codex's hooks,
+Cursor's model access control, Claude Code's permission modes, opencode's agent
+directory — with ground truth read off the current docs. Each run is a real Claude
+Code, **with WebFetch and WebSearch enabled in every arm**: the control is not a
+model with its hands tied, it is what you already have. Answers graded blind
+against the key, three independent passes.
+
+| | wrong answers | accuracy | wall | cost |
+| --- | --- | --- | --- | --- |
+| Claude Code alone (n=80) | **26%** | 0.63 | 51s | $0.311 |
+| \+ anydocs (n=80) | 20% | 0.70 | 44s | $0.319 |
+| **\+ anydocs + the `AGENTS.md` line below (n=60)** | **6%** | **0.78** | **27s** | **$0.275** |
+
+**Four times fewer wrong answers — and it is faster and cheaper at the same time.**
+
+The middle row is the point. **Mounting the server is not enough.** With anydocs
+available but nothing telling the agent to use it, it sometimes just answers from
+memory — and when it does, it is wrong: asked for Claude Code's permission modes it
+replied in a single turn, named four, and missed `auto` and `dontAsk`. One line of
+instruction takes the skip rate to zero, and it is the difference between 20% wrong
+and 6%.
+
+So the line is not optional. It is in both install paths below.
 
 ## Install
 
@@ -53,13 +79,7 @@ required = true
 ANYDOCS_SOURCES = "codex"
 ```
 
-Restart Codex after changing configuration. To make tool selection reliable,
-put this in the project's `AGENTS.md`:
-
-```md
-When anydocs MCP is available, use search_docs with the product's source and
-then read_doc before answering questions about that product's documentation.
-```
+Restart Codex after changing configuration. **Then do step 2.**
 
 ### Clients using `.mcp.json`
 
@@ -81,6 +101,24 @@ first run.
   }
 }
 ```
+
+**Then do step 2.**
+
+### Step 2 — tell the agent to use it
+
+Put this in the project's `AGENTS.md` (or `CLAUDE.md`):
+
+```md
+When anydocs MCP is available, use search_docs with the product's source and
+then read_doc before answering questions about that product's documentation.
+```
+
+**Do not skip this.** A mounted MCP server the agent does not call is worth
+nothing, and an agent that feels sure will answer from memory instead — which is
+exactly when it is wrong. Measured over 140 runs, this line takes the
+answer-from-memory rate to **zero**, cuts wrong answers from **20% to 6%**, and
+makes the agent *faster* (27s against 44s), because one search beats three
+guesses at a docs URL.
 
 ## Scoping a project to the docs it uses
 
@@ -189,11 +227,26 @@ uv run python scripts/sweep_chunk.py      # re-chunk from pages.body, no refetch
 A local `build/` directory takes precedence over the published index, so
 `anydocs-build` then `anydocs` serves what you just built.
 
-Retrieval changes need evidence. `scripts/eval_search.py` scores against a
-hand-written gold set plus 276 auto-derived questions (each page's llms.txt
-description, which is a paraphrase and is not among the indexed columns). A
-one-case swing on the hand set is noise; several plausible improvements died on
-these numbers.
+Retrieval changes need evidence, and every ruler here measures exactly one thing.
+`scripts/eval_search.py` runs three: 15 hand-written questions (precision), 284
+auto-derived ones (each page's llms.txt description as the query — broad ranking
+movement), and 1,956 built from the anchor text of the docs' own internal links
+(recall@8 only, and the only text in the corpus that leaks into neither the index
+nor the descriptions). `eval_rescue.py` and `eval_served.py` cost model calls and
+stay out of CI.
+
+Several plausible improvements died on these numbers, and a few shipped and had to
+be reverted because the ruler was wrong rather than the code. `AGENTS.md` keeps the
+list, with the numbers, so nobody spends a day re-deriving them.
+
+### About the benchmark at the top
+
+Ten questions, chosen by me, all on config surface — the ground a docs tool is
+supposed to own. It says nothing about a question with no documented answer, and a
+model that already knows React does not need this. Answers were graded by an LLM
+against a hand-verified key; a single grading pass moves the accuracy figure by up
+to 10 points, which is why the table reports the mean of three and the wrong-answer
+ranges (25–29% / 18–21% / 5–8%) do not overlap where it matters.
 
 ## License
 
