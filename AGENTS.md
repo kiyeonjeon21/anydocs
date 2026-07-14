@@ -8,6 +8,16 @@ MCP server: BM25 search over other tools' documentation. Ingest in CI → SQLite
 FTS5 → publish as a GitHub Release asset → the client downloads it and serves
 five tools locally.
 
+**The rest of this file is for agents working *on* anydocs, and none of it
+ships.** What reaches someone *using* the server is `SERVER_INSTRUCTIONS` and the
+five tool docstrings in `server.py` — about 1,000 tokens, and the only guidance a
+caller will ever see. So a lesson that should change how a **caller** behaves has
+to be written *there*. Writing it down here reaches nobody but us.
+
+Keep this file to rules — the things a future session must not get wrong. The
+story of how each rule was found is in `git log`, where the commit messages run to
+forty lines and cost nothing to carry.
+
 ## The one number that matters
 
 **A search must stay around 500 tokens.** The obvious way to build a docs-search
@@ -16,16 +26,12 @@ gap is the entire reason this project exists. `search_docs` returns snippets and
 `read_doc` is a separate call *because* of it. If a change makes search verbose,
 it has broken the point of the project.
 
-And the budget must be *spent on something*. Search returned eight rows and only
-**4.5 distinct pages**: `SEARCH_SQL` deduped by `(source, path, anchor)` and let a
-page take two slots, while `src_rank` cut the candidate set at eight *chunks* — so
-a second section of a page already listed ate a slot and nothing refilled it. The
-ninth-ranked page, which might be the answer, was never considered. A second
-section of a page the caller already has adds nothing to the only decision search
-supports: **which page to read.** Deduping by `(source, path)` buys eight pages
-for eight slots — recall@8 0.859 → 0.897, precision unmoved — and the snippet
-pays for it (300 → 200 chars, which costs the tail of an API field list and
-nothing a caller routes on).
+And the budget must be *spent on something*. **`SEARCH_SQL` dedupes by
+`(source, path)`, never by anchor**: eight rows must be eight distinct pages,
+because the only decision a search supports is *which page to read*, and a second
+section of a page the caller already has spends a slot on nothing. The 200-char
+snippet is what pays for it. (Per-anchor dedup delivered 4.5 distinct pages per
+search; recall@8 0.859 → 0.897, precision unmoved on every ruler.)
 
 ## Failure must be loud
 
@@ -53,58 +59,39 @@ re-runs the missed word on its own and names the pages it is really on
 (`query.rescue_term`), and `read_doc` ends with the page's own cross-references
 (`query.outlinks`). If you add a new way to fail, make it point somewhere.
 
-### A dead end is the loudest failure of all, and read_doc had 22
+### And a dead end is the loudest failure of all
 
-`search_docs` was healthy the whole time. What was broken sat one call later.
+`search_docs` was healthy the whole time; what was broken sat one call later.
+`read_doc` **could not return 22 sections at all** — a caller who did exactly the
+right thing hit a wall with nothing to do next. Four invariants came out of it,
+and each is a way to fail that now points somewhere (`git log 94933e8`):
 
-`read_doc` outlined an over-long section against its H2/H3 children — and an H3's
-children are H4s, so `en/hooks` § `PreToolUse` came back as a table cut mid-row
-above **an empty menu**. Thirteen more sections have no subheadings at *any*
-level, because they are one enormous table: the settings reference, the env-var
-reference, every slash command. For those an outline is not a poor answer, it is
-the wrong question — and `read_doc` **could not return them at all**. A caller who
-did exactly the right thing hit a wall with nothing to do next.
+- **An over-long section is outlined if it has children and paginated if it does
+  not** (`_shrink`). Thirteen of the 22 are one enormous table — the settings
+  reference, the env-vars reference, every slash command — and for those an outline
+  is not a poor answer, it is the wrong question. `part=` is the escape hatch that
+  always exists.
+- **An outline reads the level *below the parent*.** An H3's children are H4s;
+  outlining `en/hooks` § `PreToolUse` against H2/H3 gave a mid-row table cut above
+  **an empty menu**. Every anchor an outline prints round-trips through `read_doc`
+  — there is a corpus-wide test.
+- **The anchor `search_docs` hands you must be one `read_doc` accepts.**
+  `slug_style` is *not in the shipped index*, so the server does not try to know
+  it: it offers all three spellings and keeps whichever the caller used
+  (`SLUG_STYLES`). That makes 4 headings in 638 pages ambiguous, and `read_doc`
+  says so rather than returning the first of two in silence.
+- **A `LIMIT` is a lie told quietly.** `list_pages` (once 7,600 tokens on
+  claude-code, from the tool that calls itself a cheap map), `grep_docs`' per-page
+  cap, and the outlink footer all now name what they left out, with an exact total.
 
-So: **an over-long section is now outlined if it has children and paginated if it
-does not** (`_shrink`), the outline reads the level *below the parent*, and
-`part=` is the escape hatch that always exists. Every anchor an outline prints
-round-trips through `read_doc`; there is a corpus-wide test for it, and the count
-that matters is **22 dead ends → 0**.
-
-Two more of the same shape, both fixed, both worth not reintroducing:
-
-- **The anchor `search_docs` hands you must be one `read_doc` accepts.** It was
-  not. `extract_section` slugged with the default style while the indexer used the
-  source's own, so `opencode/rules#using-opencodejson` — dropped dot and all —
-  "did not exist". `slug_style` is *not in the shipped index*, so the server does
-  not try to know it: it offers all three spellings and keeps whichever the caller
-  used (`SLUG_STYLES`). Across 638 pages that makes exactly 4 headings ambiguous,
-  all of them the same title in two cases, and `read_doc` now says so out loud
-  rather than returning the first of two in silence.
-- **A `LIMIT` is a lie told quietly.** `list_pages` had no cap at all and cost
-  7,600 tokens on claude-code — fifteen searches, from the tool that calls itself
-  a cheap map. `grep_docs` showed 3 of a page's 52 matches and said nothing. The
-  footer showed 8 of `en/settings`' 51 cross-references and said nothing. All three
-  now name what they left out; `query.outlinks` counts the total exactly, the way
-  `rescue_term` already did.
-
-### Two things the rescue does not do, and cannot yet
-
-**It fires on words that carry nothing.** Over 16 natural-language questions it
-fired 5 times and 4 were noise: `stop` (105 pages), `happens` (44), `prompt`
-(49) — it names three unrelated pages and tells the caller to read one before
-answering. This is not free: the whole sandbox fix rests on the caller *believing*
-the NOTE, and a note that cries wolf spends exactly that. Five ways to suppress
-it were measured; all five are in the rejected table below. The false alarms are
-the price of the fix, and nothing cheap in this index buys them down.
-
-**It is blind to the query whose words all matched — and all missed.** Asked
-`limit which model an org member can select`, Cursor's docs return org roles and
-spend limits, no NOTE, because `limit`, `model`, `org`, `member` and `select` each
-match *somewhere*. Ask in the docs' own words — `model access control allowed
-models team admin` — and `enterprise/model-and-integration-management#model-access-control`
-is the top hit. `rescue_term` only sees a word that reached nothing, so the
-failure where every word reached the *wrong* thing is invisible. This one is open.
+**The rescue's false alarms are the price of the fix, and they are not cheap.**
+Over 16 natural-language questions it fired 5 times and 4 were noise — `stop` (105
+pages), `happens` (44), `prompt` (49) — naming unrelated pages and telling the
+caller to read one before answering. The whole sandbox fix rests on the caller
+*believing* the NOTE, and a note that cries wolf spends exactly that. Five ways to
+suppress it were measured; all five are in the rejected table. Nothing cheap in
+this index buys them down. What the rescue *still* cannot see is under **Known,
+and not fixed** — it is the largest open defect in the project.
 
 ## Do not retry these — they were measured and rejected
 
@@ -172,34 +159,19 @@ margin did exactly that: 0.993 vs 0.55 hit@1 on the auto set, and live,
 chunks nearly level *when it is right*. Measure confidence against the hand set
 and real questions, never against the auto set.
 
-**And the anchor set cannot score a reformulation.** `scripts/eval_2shot.py` asked
-whether a second search — the caller re-aiming at the docs' own vocabulary — beats
-simply showing more rows. It does, barely, and the control is what matters:
-
-| | anchor recall@8 |
-| --- | --- |
-| `shot1@8` — as shipped | 0.897 |
-| `shot1@16` — **the control**: same query, twice the rows | **0.937** |
-| `2shot@8+8` — shot 1, then a model rewrites from the 8 wrong titles | 0.945 |
-
-So of the +4.8pp, **+4.0 is slots and +0.8 is the rewrite.** Look at what it
-recovered and the reason is plain: `learn more about hooks →` → `hooks`. The
-anchor set's misses are *link-label noise*, not vocabulary mismatch — nobody types
-`learn more about hooks →`, and de-arrowing a label is not the failure a second
-search exists for. The flagship case (`limit which model an org member can select`)
-is not in the anchor set at all. **This is a third ruler with a third blind spot,
-and it is the wrong instrument for anything about how a query is phrased.**
-
-Two things the run did establish, and both matter more than the headline:
-
-- **Sixteen rows are worth +4pp of recall** (0.897 → 0.937). That is the 500-token
-  budget arguing with itself, and it is why a second search is the right shape: it
-  buys the 16-row recall at ~550 tokens expected, not 1,000, because the 90% of
-  searches that already work never pay for it.
-- **The number assumes an oracle.** The eval *told* the rewriter that shot 1 had
-  missed. A caller is not told. So 0.945 is the ceiling of a 2-shot with perfect
-  weak-detection, and weak-detection is exactly what is broken (see below). Do not
-  quote 0.945 as a result.
+**And the anchor set cannot score a reformulation.** `scripts/eval_2shot.py`
+(~200 model calls, not in CI) asked whether a second search re-aimed at the docs'
+vocabulary beats simply showing more rows. Headline 0.897 → 0.945 — but the
+control, *the same query with sixteen rows*, already gives **0.937**. So +4.0pp is
+slots and **+0.8 is the rewrite**, and what it recovered says why: `learn more
+about hooks →` → `hooks`. **The anchor set's misses are link-label noise, not
+vocabulary mismatch**, and the flagship case is not in the set at all. A third
+ruler with a third blind spot: it cannot judge anything about how a query is
+phrased. Two things it *did* establish, both bigger than the headline — **sixteen
+rows are worth +4pp**, which is exactly why a *second* search is the right shape
+(same ceiling at ~550 expected tokens, not 1,000, because the 90% that already
+work never pay); and **0.945 assumes an oracle**, because the eval told the
+rewriter it had missed. Do not quote it. (`git log 039d2bf`.)
 
 `scripts/sweep_chunk.py` re-chunks from `pages.body`, so sweeping chunk size or
 weights needs **no refetch** — a full sweep is seconds.
@@ -259,40 +231,35 @@ HTTP 200 for every unknown path, so bodies are content-checked, not trusted.
   4 pages in 638. `read_doc` says so out loud, but the emitted link is still
   wrong. Fixing it properly means numbering in `chunk.py` — which is an index
   change, hence a republish, hence a `SCHEMA_VERSION` question.
-- **The silent weak result.** Asked `limit which model an org member can select`,
-  Cursor's docs return org roles and spend limits, no NOTE — every word matched
-  *something* — and the answer is not in the eight. Ask in the docs' own words
-  (`model access control`) and it is first. `rescue_term` only sees a word that
-  reached nothing, so the failure where every word reached the *wrong* thing is
-  invisible.
+- **The silent weak result — half fixed, and the missing half is the trigger.**
+  Asked `limit which model an org member can select`, Cursor's docs return org
+  roles and spend limits, no NOTE — every word matched *something* — and the answer
+  is not in the eight. `rescue_term` only sees a word that reached *nothing*, so
+  the failure where every word reached the **wrong** thing is invisible.
 
-  There is now half a fix, and it is worth knowing which half. **The caller can
-  usually produce the missing name.** Asked the question closed-book, the model
-  guessed "Model Allowlist? Allowed Models? *Model Access*?" — and `model access`
-  returns the right page at 1, 2 and 3. It held the key and never put it in the
-  door, because nothing told it to. So `search_docs` now says out loud that a
-  search costs ~500 tokens and it should **budget for two**, re-aiming at the name
-  the docs would use. That is the whole change; it touches no index.
+  The half that is fixed: **the caller can usually produce the missing name.**
+  Closed-book, the model guessed "Model Allowlist? Allowed Models? *Model
+  Access*?" — and `model access` returns the right page at 1, 2 and 3. It held the
+  key and never used it, because nothing told it to. `search_docs` now says a
+  search costs ~500 tokens and it should **budget for two**. No index change.
 
-  **What is still missing is the trigger.** The instruction fires on "if the rows
-  do not cohere" — and whether a caller can judge that is unmeasured. Below is why
-  the one signal we have cannot be relied on to do it.
+  The half that is not: **whether a caller can judge "these rows do not cohere" is
+  unmeasured**, and the one signal that could tell it is broken —
 
 - **The rescue NOTE is a function of `limit`, not of missing.** `unmatched_terms`
-  asks whether a word appears anywhere in the returned chunks — *including their
-  bodies*. So the more rows you return, the likelier a word is buried in one of
-  them, and the warning **silently switches itself off**. The flagship query above
-  fires a NOTE at `limit=3` and names `cursor/enterprise/model-and-integration-management`
-  first — the answer — and says nothing at `limit=8`. Nobody designed that.
+  asks whether a word appears anywhere in the returned chunks *including their
+  bodies*, so the more rows you return, the likelier it is buried in one and the
+  warning **silently switches itself off**. The query above fires a NOTE at
+  `limit=3`, naming the answer page first, and says nothing at `limit=8`. Nobody
+  designed that.
 
-  A caller routes on titles and headings, and `model` appears in **none** of those
-  eight (`Roles`, `Set User Spend Limit`, `Manage members`, `Enhanced Spend
-  Limits`…). Scoping the check to title/heading fires the rescue exactly where the
-  silent weak result lives. **Do not just ship it:** it necessarily fires *more*,
-  and 4 of 5 rescues on natural-language questions were already noise — the whole
-  sandbox fix rests on the caller believing the NOTE. **There is no ruler for
-  rescue precision.** Sixteen hand-counted questions is all there has ever been.
-  Build the ruler first; it is the blocking piece for everything above.
+  A caller routes on titles and headings, and `model` is in **none** of those eight
+  (`Roles`, `Set User Spend Limit`, `Enhanced Spend Limits`…). Scoping the check to
+  title/heading fires the rescue exactly where this defect lives. **Do not just
+  ship it:** it necessarily fires *more*, 4 of 5 rescues on natural-language
+  questions were already noise, and the whole sandbox fix rests on the caller
+  *believing* the NOTE. **There has never been a ruler for rescue precision** —
+  sixteen hand-counted questions is all there is. Build it first; it blocks this.
 
 ## Verify before committing
 
