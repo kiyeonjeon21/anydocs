@@ -114,12 +114,14 @@ Re-deriving them costs a day each.
 | Suppressing a rescue by whether a page is *named* after the word (`path LIKE`) | The best of the five, and still 9/12: it silences `telemetry` and `ollama`, whose answers live on `en/env-vars` and `providers`. Losing 2 true rescues of 6 costs more than 4 false ones. |
 | Warning when the top hit's BM25 margin over the runner-up is small | Looks decisive on the auto set — margin ≥ 0.2 → hit@1 0.993, < 0.1 → 0.55 — and it is an artifact of the ruler. See below. |
 | Indexing `pages.description` as a fourth FTS field | It looks like a free win and it is a trap twice over. On the honest ruler it is worth **+1.8pp hit@1** — and on the auto set it reads as +10pp (0.876 → 0.976), because the auto set's *query is the description*. Indexing it **destroys the instrument**: 284 cases of eval, traded for 35 cases out of 1,956. |
+| **Tightening the rescue's trigger to fire more** — testing the word against title/heading instead of the whole chunk | The obvious reading of "a caller routes on titles, so a word buried in a body never *reached* them", and it is a disaster: **291 fires over 500 questions, 246 of them at a caller who already had the answer.** It warns that `hook events list` does not contain `list` while handing back `en/hooks`. Content words live in bodies; that is what bodies are. `visible` (title + heading + the 200-char snippet the caller can actually see) is the principled version and it is no better — precision 0.023. Measured, all three, in `scripts/eval_rescue.py`. |
 | Raising `MIN_CHUNK` off the floor because it drops 369 sections | Almost all of what it drops is a JSX landing stub (`<CodexCliLanding />`). The real short sections it loses (`Vim editor mode`) are covered elsewhere in the corpus and still rank. Not a user-visible bug. Verify the claim before acting on it: a report that `PermissionBehavior` was unsearchable was simply wrong — it ranks first. |
 
 ## Retrieval changes need evidence
 
-Do not tune by feel. `scripts/eval_search.py` scores three gold sets, and **each
-one measures exactly one thing**:
+Do not tune by feel. `scripts/eval_search.py` scores three gold sets — and there is
+a fourth, `scripts/eval_rescue.py`, for the NOTE. **Each measures exactly one
+thing, and using the wrong one has shipped a bad change more than once.**
 
 - **hand** — 15 hand-written questions. Precision. Realistic, but **a one-case
   swing is noise**.
@@ -129,6 +131,17 @@ one measures exactly one thing**:
   columns, so it is a paraphrase, not the text being searched.
 - **anchor** — 1,956 cases: the anchor text of the docs' own links
   (`[hook events list](/en/hooks)` → `en/hooks`). **Recall@8, and nothing else.**
+- **rescue** (`scripts/eval_rescue.py`, not in CI — it spends model calls) — 500
+  natural-language *questions*, built by expanding each anchor phrase into the
+  sentence a developer would type. **The expander sees only the phrase and the
+  product name, never the target page**, so it cannot copy vocabulary it was never
+  shown and the gold comes free from the anchor set. It exists because the NOTE is
+  a *confidence* signal and nothing else here has a question with filler in it —
+  and filler is the whole problem. It scores the four outcomes that matter:
+  **TRUE** (shot 1 missed, the NOTE named the gold), **FALSE** (missed, named
+  something else), **CRY WOLF** (shot 1 *had* the gold and the NOTE sent the caller
+  away anyway), and **silent** (missed, and nothing warned). Cry-wolf is the one
+  that costs; see "Known, and not fixed".
 
 The anchor set is the only text in the corpus that judges retrieval without
 leaking — it is indexed neither in `chunks_fts` nor in `description` — and it is
@@ -246,20 +259,27 @@ HTTP 200 for every unknown path, so bodies are content-checked, not trusted.
   The half that is not: **whether a caller can judge "these rows do not cohere" is
   unmeasured**, and the one signal that could tell it is broken —
 
-- **The rescue NOTE is a function of `limit`, not of missing.** `unmatched_terms`
-  asks whether a word appears anywhere in the returned chunks *including their
-  bodies*, so the more rows you return, the likelier it is buried in one and the
-  warning **silently switches itself off**. The query above fires a NOTE at
-  `limit=3`, naming the answer page first, and says nothing at `limit=8`. Nobody
-  designed that.
+- **The rescue NOTE cries wolf, and now there is a number for it: precision
+  0.048.** Over 500 natural-language questions (`scripts/eval_rescue.py`) it fires
+  21 times, is right **once**, and **18 of the 21 fire at a caller who already had
+  the answer in the eight rows.** It warns on `work`, `manage`, `using`,
+  `configure`, `integrating`, `difference` — grammatical filler that survives the
+  stoplist and carries no topic. The one thing it reliably rescues is a version
+  number (`2.1.114` → `en/changelog`).
 
-  A caller routes on titles and headings, and `model` is in **none** of those eight
-  (`Roles`, `Set User Spend Limit`, `Enhanced Spend Limits`…). Scoping the check to
-  title/heading fires the rescue exactly where this defect lives. **Do not just
-  ship it:** it necessarily fires *more*, 4 of 5 rescues on natural-language
-  questions were already noise, and the whole sandbox fix rests on the caller
-  *believing* the NOTE. **There has never been a ruler for rescue precision** —
-  sixteen hand-counted questions is all there is. Build it first; it blocks this.
+  The whole sandbox fix rests on the caller *believing* the NOTE, and this is what
+  that belief is being spent on. **The rescue's trigger is the open problem, and
+  every reading of it that has been tried is in the rejected table.** On the hand
+  set — keyword queries, which is what `search_docs` asks callers to write — it
+  fires zero times and cry-wolfs zero times. The pathology is entirely in
+  natural-language phrasing.
+
+  It is also still true that the trigger is **a function of `limit`**:
+  `unmatched_terms` looks for the word anywhere in the returned chunks, bodies
+  included, so more rows means more places for it to be buried and the warning
+  quietly switches off. `limit=3` fires a NOTE on the query above and names the
+  answer page first; `limit=8` says nothing. That is not a designed behaviour —
+  but do not "fix" it by tightening the test. See the rejected table.
 
 ## Verify before committing
 
