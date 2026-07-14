@@ -12,6 +12,13 @@ from anydocs.models import Page, Source, slug_path
 ENTRY_RE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]+)\]\((?P<url>[^)]+)\)\s*(?::\s*(?P<desc>.*))?$")
 
 
+def page_fetch_url(url: str, source: Source) -> str:
+    if not source.fetch_base_url:
+        return url
+    path = slug_path(url, source.base_url)
+    return f"{source.fetch_base_url.rstrip('/')}/{path}.md"
+
+
 async def ingest(source: Source) -> tuple[list[Page], list[str]]:
     """llms.txt used as an *index*: each line links to a page's markdown twin.
 
@@ -22,7 +29,7 @@ async def ingest(source: Source) -> tuple[list[Page], list[str]]:
     async with httpx.AsyncClient(follow_redirects=True, timeout=TIMEOUT) as client:
         index = await fetch_text(client, source.entry)
 
-    meta: dict[str, tuple[str, str]] = {}
+    meta: dict[str, tuple[str, str, str]] = {}
     for line in index.splitlines():
         m = ENTRY_RE.match(line)
         if not m:
@@ -30,14 +37,17 @@ async def ingest(source: Source) -> tuple[list[Page], list[str]]:
         url = m["url"]
         if not url.endswith(".md") or not allowed(url, source):
             continue
-        meta[url] = (m["title"].strip(), (m["desc"] or "").strip())
+        fetch_url = page_fetch_url(url, source)
+        meta[fetch_url] = (url, m["title"].strip(), (m["desc"] or "").strip())
 
     fetched = await fetch_many(list(meta))
     pages, errors = [], []
-    for url, (title, desc) in meta.items():
-        body = fetched[url]
+    for fetch_url, (url, title, desc) in meta.items():
+        body = fetched[fetch_url]
         if isinstance(body, Exception):
-            errors.append(f"{url}: {body}")
+            errors.append(
+                f"{url} (fetched as {fetch_url}): {type(body).__name__}: {body}"
+            )
             continue
         pages.append(
             Page(

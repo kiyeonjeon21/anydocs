@@ -5,8 +5,9 @@ import sqlite3
 import pytest
 
 from anydocs.chunk import anchor_slug, chunk_page
-from anydocs.ingest.fetch import SoftNotFound, validate_markdown
+from anydocs.ingest.fetch import SoftNotFound, fetch_text, validate_markdown
 from anydocs.ingest.filters import extract_title
+from anydocs.ingest.llms_txt import page_fetch_url
 from anydocs.links import build_links
 from anydocs.models import Page, Source, slug_path
 from anydocs.index import SCHEMA
@@ -27,6 +28,9 @@ class FakeResponse:
         self.headers = {"content-type": ctype}
         self.url = "https://example.com/x.md"
 
+    def raise_for_status(self):
+        return None
+
 
 def test_soft_404_is_rejected():
     """docs.cursor.com answers 200 + an HTML shell for every unknown path."""
@@ -38,6 +42,28 @@ def test_soft_404_is_rejected():
     with pytest.raises(SoftNotFound):
         validate_markdown(FakeResponse("   ", "text/markdown"))
     assert validate_markdown(FakeResponse("# Real page")) == "# Real page"
+
+
+def test_transient_fetch_failures_are_retried(monkeypatch):
+    import asyncio
+    import httpx
+
+    calls = 0
+
+    class Client:
+        async def get(self, url):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise httpx.ReadTimeout("slow")
+            return FakeResponse("# Recovered")
+
+    async def no_wait(_):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    assert asyncio.run(fetch_text(Client(), "https://example.com/x.md")) == "# Recovered"
+    assert calls == 3
 
 
 @pytest.mark.parametrize(
@@ -182,6 +208,7 @@ def test_unknown_source_is_refused_not_silently_empty(monkeypatch):
     from anydocs import server
 
     monkeypatch.setattr(server, "known_sources", lambda: ["claude-code", "codex"])
+    monkeypatch.setattr(server, "indexed_sources", lambda: ["claude-code", "codex"])
     monkeypatch.setattr(server, "enabled_sources", lambda: [])
 
     assert server.scope_for("claude-code") == ["claude-code"]
@@ -208,6 +235,20 @@ def test_docs_root_gets_a_readable_path():
     unreadable."""
     assert slug_path("https://opencode.ai/docs/", "https://opencode.ai/docs/") == "index"
     assert slug_path("https://opencode.ai/docs/cli.md", "https://opencode.ai/docs/") == "cli"
+
+
+def test_llms_txt_can_fetch_markdown_from_a_cross_host_alias():
+    source = Source(
+        id="codex",
+        title="Codex",
+        strategy="llms-txt",
+        entry="https://learn.chatgpt.com/llms.txt",
+        base_url="https://developers.openai.com/codex/",
+        fetch_base_url="https://learn.chatgpt.com/docs/",
+    )
+    assert page_fetch_url(
+        "https://developers.openai.com/codex/guides/best-practices.md", source
+    ) == "https://learn.chatgpt.com/docs/guides/best-practices.md"
 
 
 def test_chunker_ignores_headings_inside_code_fences():
@@ -346,7 +387,12 @@ def test_outlinks_put_see_also_first():
         [("s", "from", "prose-a", 0, 0), ("s", "from", "prose-b", 0, 1),
          ("s", "from", "seealso", 1, 2)],
     )
-    assert [r["path"] for r in outlinks(conn, "s", "from", limit=8)] == [
-        "seealso", "prose-a", "prose-b",
-    ]
-    assert [r["path"] for r in outlinks(conn, "s", "from", limit=2)] == ["seealso", "prose-a"]
+    rows, total = outlinks(conn, "s", "from", limit=8)
+    assert [r["path"] for r in rows] == ["seealso", "prose-a", "prose-b"]
+    assert total == 3
+
+    # The total is counted separately, and exactly, so a LIMIT cannot pass itself
+    # off as the whole story: read_doc says "8 of 51", not "8".
+    rows, total = outlinks(conn, "s", "from", limit=2)
+    assert [r["path"] for r in rows] == ["seealso", "prose-a"]
+    assert total == 3

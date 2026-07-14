@@ -9,4 +9,5 @@ base_url: https://cursor.com/docs/
 page_suffix: .md
 # The sitemap carries 13 locales (3347 URLs); English pages have no locale prefix.
 include: ["https://cursor.com/docs/*"]
+exclude: ["https://cursor.com/docs/page.mdx"]  # sitemap template; every twin is a real 404
 expect_pages: 165

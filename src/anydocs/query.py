@@ -7,8 +7,14 @@ import sqlite3
 # Weights: a hit in the page title beats one in a heading beats one in prose.
 BM25_WEIGHTS = (10.0, 5.0, 1.0)
 POOL = 200  # rows ranked before quotas are applied
-SNIPPET_TOKENS = 24  # FTS5 silently clamps this at 64
-SNIPPET_CHARS = 300
+# One row per page (see SEARCH_SQL) means 8 slots buy 8 pages instead of 4.5, and
+# the extra rows have to come from somewhere: a shorter snippet. That is the
+# right way round. search_docs exists to name the page worth reading — read_doc
+# supplies the text — and what these lose is the tail of an API field list, not
+# anything a caller routes on. Measured: 442 -> 500 tokens, and the whole budget
+# now goes on distinct pages.
+SNIPPET_TOKENS = 16  # FTS5 silently clamps this at 64
+SNIPPET_CHARS = 200
 
 TERM = re.compile(r"[0-9A-Za-zÀ-ɏ]+")
 
@@ -84,6 +90,20 @@ def compile_query(raw: str) -> list[str]:
     ]
 
 
+# One row per PAGE, not per section.
+#
+# It used to keep the best chunk of each (page, anchor) and allow a page two of
+# the eight slots. That reads as generous and is not: `src_rank` is cut at the
+# limit, so the candidate set was the top 8 *chunks* — and when three of those
+# were second sections of pages already listed, the eight promised results came
+# back as 4.5 distinct pages with nothing to refill the slots they took. Pages
+# ranked ninth and tenth, one of which may be the answer, were never considered.
+#
+# A second section of a page the caller has already been handed adds nothing to
+# the only decision search_docs supports: which page to read. Measured over 1,956
+# anchor-text cases, spending those slots on new pages instead lifts recall@8
+# from 0.851 to 0.902 and leaves precision untouched (hand 11/15 @1, 13/15 @3;
+# auto hit@1 0.792 — identical).
 SEARCH_SQL = """
 WITH hits AS (
   SELECT c.id AS chunk_id,
@@ -101,21 +121,19 @@ WITH hits AS (
 ),
 dedup AS (
   SELECT * FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY source, path, anchor ORDER BY score DESC) AS rn
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY source, path ORDER BY score DESC) AS rn
     FROM hits
   ) WHERE rn = 1
 ),
 ranked AS (
   SELECT *,
-         ROW_NUMBER() OVER (PARTITION BY source ORDER BY score DESC)       AS src_rank,
-         ROW_NUMBER() OVER (PARTITION BY source, path ORDER BY score DESC) AS page_rank,
-         ROW_NUMBER() OVER (ORDER BY score DESC)                           AS global_rank
+         ROW_NUMBER() OVER (PARTITION BY source ORDER BY score DESC) AS src_rank,
+         ROW_NUMBER() OVER (ORDER BY score DESC)                     AS global_rank
   FROM dedup
 )
 SELECT chunk_id, source, path, anchor, breadcrumb, title, heading, description, score, snip
 FROM ranked
-WHERE page_rank <= 2
-  AND (global_rank <= 3 OR src_rank <= ?)
+WHERE global_rank <= 3 OR src_rank <= ?
 ORDER BY score DESC
 LIMIT ?
 """
@@ -181,10 +199,7 @@ def unmatched_terms(
     )
     missing = []
     for unit in query_units(query):
-        try:
-            hit = conn.execute(sql, [unit, *ids]).fetchone()
-        except sqlite3.OperationalError:
-            continue
+        hit = conn.execute(sql, [unit, *ids]).fetchone()
         if not hit:
             missing.append(unit.strip('"'))
     return missing
@@ -199,16 +214,31 @@ ORDER BY l.in_seealso DESC, l.ord
 LIMIT ?
 """
 
+OUTLINKS_COUNT_SQL = """
+SELECT COUNT(*) FROM links l
+JOIN pages p ON p.source = l.source AND p.path = l.to_path
+WHERE l.source = ? AND l.from_path = ?
+"""
 
-def outlinks(conn: sqlite3.Connection, source: str, path: str, limit: int) -> list[sqlite3.Row]:
+
+def outlinks(
+    conn: sqlite3.Connection, source: str, path: str, limit: int
+) -> tuple[list[sqlite3.Row], int]:
     """The pages this page points at — the docs' own cross-references (links.py).
+
+    Returns (rows, total). The total is counted separately and exactly, the way
+    `rescue_term` does it, because `LIMIT` is a lie told silently: Claude Code's
+    settings page cross-references 51 others and the footer shows 8. Saying "8"
+    and meaning "8 of 51" is the same class of bug as the rest of this file.
 
     "See also" first: those are the links an author filed under an explicit
     read-this-next heading, as opposed to the ones that merely happen to appear
     in the prose. Within each group, the order the author wrote them, which is
     the only ordering here that is not a guess of ours.
     """
-    return conn.execute(OUTLINKS_SQL, (source, path, limit)).fetchall()
+    rows = conn.execute(OUTLINKS_SQL, (source, path, limit)).fetchall()
+    total = conn.execute(OUTLINKS_COUNT_SQL, (source, path)).fetchone()[0]
+    return rows, total
 
 
 RESCUE_SQL = """
@@ -252,18 +282,15 @@ def rescue_term(
     filt = f"AND c.source IN ({','.join('?' * len(sources))})" if sources else ""
     unit = f'"{term}"'
     params = [unit, *(sources or [])]
-    try:
-        rows = conn.execute(
-            RESCUE_SQL.format(source_filter=filt, pool=POOL),
-            [*BM25_WEIGHTS, *params],
-        ).fetchall()
-        # Counted separately, and exactly: the ranked query above stops at POOL
-        # chunks, so the pages it happens to reach are a floor, not the total.
-        total = conn.execute(
-            RESCUE_COUNT_SQL.format(source_filter=filt), params
-        ).fetchone()[0]
-    except sqlite3.OperationalError:
-        return [], 0
+    rows = conn.execute(
+        RESCUE_SQL.format(source_filter=filt, pool=POOL),
+        [*BM25_WEIGHTS, *params],
+    ).fetchall()
+    # Counted separately, and exactly: the ranked query above stops at POOL
+    # chunks, so the pages it happens to reach are a floor, not the total.
+    total = conn.execute(
+        RESCUE_COUNT_SQL.format(source_filter=filt), params
+    ).fetchone()[0]
     pages = list(dict.fromkeys(f"{r['source']}/{r['path']}" for r in rows))
     return pages[:limit], total
 
@@ -288,10 +315,7 @@ def search(
 
     for expr in compile_query(query):
         params = [*BM25_WEIGHTS, SNIPPET_TOKENS, expr, *(sources or []), per_source, limit]
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        except sqlite3.OperationalError:
-            continue
+        rows = conn.execute(sql, params).fetchall()
         if rows:
             return rows, expr
     return [], ""

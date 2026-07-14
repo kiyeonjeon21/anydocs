@@ -3,10 +3,11 @@ title: OpenAI Codex
 tags: [coding-agent, openai]
 strategy: llms-txt
 entry: https://learn.chatgpt.com/llms.txt
-# The llms.txt is served from learn.chatgpt.com but every page link points at
-# developers.openai.com. The .md twins on learn.chatgpt.com are component stubs
-# ("<CodexCliLanding />"), so we must follow the cross-host links.
+# The llms.txt links canonical developers.openai.com pages, but their `.md`
+# redirects are lossy for root and moved pages (`overview.md` -> `docs.md`). The
+# actual markdown twins consistently live at learn.chatgpt.com/docs/<path>.md.
 base_url: https://developers.openai.com/codex/
+fetch_base_url: https://learn.chatgpt.com/docs/
 # The index opens with a "Documentation sets" group linking to whole-corpus
 # exports rather than pages; those would be indexed as one giant duplicate page.
 exclude:
@@ -19,3 +20,4 @@ slug_style: verbatim
 # Codex's 600 internal links all look external and it has no graph at all.
 link_bases:
   - https://learn.chatgpt.com/docs/
+expect_pages: 128
