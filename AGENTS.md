@@ -172,6 +172,35 @@ margin did exactly that: 0.993 vs 0.55 hit@1 on the auto set, and live,
 chunks nearly level *when it is right*. Measure confidence against the hand set
 and real questions, never against the auto set.
 
+**And the anchor set cannot score a reformulation.** `scripts/eval_2shot.py` asked
+whether a second search — the caller re-aiming at the docs' own vocabulary — beats
+simply showing more rows. It does, barely, and the control is what matters:
+
+| | anchor recall@8 |
+| --- | --- |
+| `shot1@8` — as shipped | 0.897 |
+| `shot1@16` — **the control**: same query, twice the rows | **0.937** |
+| `2shot@8+8` — shot 1, then a model rewrites from the 8 wrong titles | 0.945 |
+
+So of the +4.8pp, **+4.0 is slots and +0.8 is the rewrite.** Look at what it
+recovered and the reason is plain: `learn more about hooks →` → `hooks`. The
+anchor set's misses are *link-label noise*, not vocabulary mismatch — nobody types
+`learn more about hooks →`, and de-arrowing a label is not the failure a second
+search exists for. The flagship case (`limit which model an org member can select`)
+is not in the anchor set at all. **This is a third ruler with a third blind spot,
+and it is the wrong instrument for anything about how a query is phrased.**
+
+Two things the run did establish, and both matter more than the headline:
+
+- **Sixteen rows are worth +4pp of recall** (0.897 → 0.937). That is the 500-token
+  budget arguing with itself, and it is why a second search is the right shape: it
+  buys the 16-row recall at ~550 tokens expected, not 1,000, because the 90% of
+  searches that already work never pay for it.
+- **The number assumes an oracle.** The eval *told* the rewriter that shot 1 had
+  missed. A caller is not told. So 0.945 is the ceiling of a 2-shot with perfect
+  weak-detection, and weak-detection is exactly what is broken (see below). Do not
+  quote 0.945 as a result.
+
 `scripts/sweep_chunk.py` re-chunks from `pages.body`, so sweeping chunk size or
 weights needs **no refetch** — a full sweep is seconds.
 
@@ -235,7 +264,35 @@ HTTP 200 for every unknown path, so bodies are content-checked, not trusted.
   *something* — and the answer is not in the eight. Ask in the docs' own words
   (`model access control`) and it is first. `rescue_term` only sees a word that
   reached nothing, so the failure where every word reached the *wrong* thing is
-  invisible. No candidate fix. The anchor recall@8 ruler is what will measure one.
+  invisible.
+
+  There is now half a fix, and it is worth knowing which half. **The caller can
+  usually produce the missing name.** Asked the question closed-book, the model
+  guessed "Model Allowlist? Allowed Models? *Model Access*?" — and `model access`
+  returns the right page at 1, 2 and 3. It held the key and never put it in the
+  door, because nothing told it to. So `search_docs` now says out loud that a
+  search costs ~500 tokens and it should **budget for two**, re-aiming at the name
+  the docs would use. That is the whole change; it touches no index.
+
+  **What is still missing is the trigger.** The instruction fires on "if the rows
+  do not cohere" — and whether a caller can judge that is unmeasured. Below is why
+  the one signal we have cannot be relied on to do it.
+
+- **The rescue NOTE is a function of `limit`, not of missing.** `unmatched_terms`
+  asks whether a word appears anywhere in the returned chunks — *including their
+  bodies*. So the more rows you return, the likelier a word is buried in one of
+  them, and the warning **silently switches itself off**. The flagship query above
+  fires a NOTE at `limit=3` and names `cursor/enterprise/model-and-integration-management`
+  first — the answer — and says nothing at `limit=8`. Nobody designed that.
+
+  A caller routes on titles and headings, and `model` appears in **none** of those
+  eight (`Roles`, `Set User Spend Limit`, `Manage members`, `Enhanced Spend
+  Limits`…). Scoping the check to title/heading fires the rescue exactly where the
+  silent weak result lives. **Do not just ship it:** it necessarily fires *more*,
+  and 4 of 5 rescues on natural-language questions were already noise — the whole
+  sandbox fix rests on the caller believing the NOTE. **There is no ruler for
+  rescue precision.** Sixteen hand-counted questions is all there has ever been.
+  Build the ruler first; it is the blocking piece for everything above.
 
 ## Verify before committing
 
@@ -245,3 +302,6 @@ uv run anydocs-build                      # real ingest; ~1 min
 uv run python scripts/eval_search.py      # no regression
 uv run python scripts/verify_anchors.py   # anchors still resolve live
 ```
+
+`scripts/eval_2shot.py` is not part of that loop — it spends ~200 model calls and
+answers one question, about reformulation, that nothing in CI can regress.

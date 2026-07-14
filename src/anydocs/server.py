@@ -60,7 +60,9 @@ SERVER_INSTRUCTIONS = """Search indexed product documentation with search_docs b
 answering documentation questions. Pass source when the product is known, use concise
 English keywords, then call read_doc on the relevant paths. Treat WARNING and NOTE as
 incomplete evidence: follow rescued and related pages before concluding that a feature
-does not exist. Use grep_docs only for exact regex lookup after search_docs."""
+does not exist. A search costs ~500 tokens, so budget for two: if the rows do not cohere
+around the question, search again with the name the docs would use for the thing rather
+than the words you would. Use grep_docs only for exact regex lookup after search_docs."""
 
 READ_ONLY_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
@@ -212,6 +214,15 @@ def search_docs(query: str, source: str | None = None, limit: int = 8) -> str:
     slots on the wrong products: a question about Claude Code hooks will also
     return Cursor's and Codex's. Omit `source` only to compare products, or when
     you genuinely do not know which one holds the answer.
+
+    **A search costs ~500 tokens. Budget for two.** The first query is the one you
+    can phrase; the second is the one the docs would. If the rows do not cohere
+    around your question — they name adjacent features, or only things you already
+    knew — do not answer from them. Guess what the docs *call* the thing and search
+    again. `limit which model an org member can select` returns org roles and spend
+    limits and warns about nothing; `model access control` — the docs' own name for
+    it — returns the right page first. You can usually produce that name; the cost
+    of trying is one more search.
 
     **Query in English.** The indexed docs are English and matching is lexical,
     so a question in another language finds nothing — translate it to English
