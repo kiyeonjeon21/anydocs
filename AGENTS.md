@@ -41,6 +41,24 @@ every docstring in context with `alwaysLoad` lands on the bare server too. The
 project-instruction channel has an authority ours does not, so **the README's
 Step 2 is not a documentation convenience, it is the product.**
 
+**But the project-instruction channel is not closed to us - we can only write
+to it manually, and a plugin does not have to.** A Claude Code plugin can ship a
+`SessionStart` hook alongside the MCP server; the hook returns the line's content
+as `hookSpecificOutput.additionalContext`, which Claude Code wraps in a system
+reminder and inserts before the first prompt, the same delivery a project's
+`AGENTS.md` gets. Screened at $2, no judge, turn counts only, same Ollama
+question, no `AGENTS.md` file present: **skipped the search 0 of 6, oss_provider
+5 of 6** - where `alwaysLoad` (a server-side attempt at the same goal) scored 2
+of 6. Passed the same pre-registered bar that `alwaysLoad` failed.
+
+**Not shipped yet, and n=6 only establishes that this did not die on the first
+screen.** It needs a properly sized arm before anyone quotes a number, it only
+helps Claude Code (Codex and Cursor users still need the manual line), and a
+hook is code a plugin runs on the user's machine, which is a higher trust bar
+than a stdio MCP server and should be disclosed as such if shipped. Worth a
+follow-up: package the server + hook as a plugin, then measure it as a fifth
+arm.
+
 **Do not ask a model what is in its own context - it will confidently make it
 up.** Asked directly, it answered `ABSENT`, `NAME_ONLY` and `UNKNOWN`, and all
 three were wrong. Only the behavioural canary is evidence.
