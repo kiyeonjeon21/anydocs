@@ -33,18 +33,25 @@ against the key, three independent passes.
 
 | | wrong answers | accuracy | wall | answered from memory |
 | --- | --- | --- | --- | --- |
-| Claude Code alone | **48%** | 0.44 | 53s | 10/40 |
-| \+ anydocs | 21% | 0.67 | 34s | 2/40 |
-| **\+ anydocs + the `AGENTS.md` line below** | **12%** | **0.69** | **30s** | **0/40** |
+| Claude Code alone | **46%** | 0.48 | 53s | 10/40 |
+| \+ anydocs | 22% | 0.68 | 34s | 2/40 |
+| **\+ anydocs + the `AGENTS.md` line below** | **8%** | **0.81** | **30s** | **0/40** |
 
-**Four times fewer wrong answers - and it is faster at the same time.** Reproduce
+**Five times fewer wrong answers - and it is faster at the same time.** Reproduce
 it with `uv run python scripts/eval_agent.py --reps 4 --passes 3` (40 runs per arm).
 
 The middle row is the point. **Mounting the server is not enough.** With anydocs
 available but nothing telling the agent to use it, it sometimes just answers from
-memory — and when it does, it is wrong: asked for Claude Code's permission modes it
-replied in a single turn, named four, and missed `auto` and `dontAsk`. One line of
-instruction takes that to zero, and it is the difference between 21% wrong and 12%.
+memory, and when it does it is wrong in the way that costs you an afternoon. Asked
+how to run Codex against Ollama, half those runs replied in a *single turn* with a
+tidy, plausible, superseded config block: `model_provider` and a
+`[model_providers.*]` table. The current answer is the `--oss` flag with
+`oss_provider`. One line of instruction takes that to zero, and it is the
+difference between 22% wrong and 8%.
+
+That question is also the sharpest thing in the set: **without anydocs the agent
+gets it wrong every single time, even after spending 50 seconds searching the
+web.** With the line, it gets it right every time in about 30.
 
 So the line is not optional. It is in both install paths below. And it cannot be
 moved inside the server: writing the same instruction into the MCP server's own
@@ -118,7 +125,7 @@ then read_doc before answering questions about that product's documentation.
 **Do not skip this.** A mounted MCP server the agent does not call is worth
 nothing, and an agent that feels sure will answer from memory instead — which is
 exactly when it is wrong. Measured over 160 runs, this line takes the
-answer-from-memory rate to **zero**, cuts wrong answers from **21% to 12%**, and
+answer-from-memory rate to **zero**, cuts wrong answers from **22% to 8%**, and
 makes the agent *faster* (30s against 34s), because one search beats three
 guesses at a docs URL.
 
@@ -248,7 +255,7 @@ supposed to own. It says nothing about a question with no documented answer, and
 model that already knows React does not need this. Answers were graded by an LLM
 against a hand-verified key; a single grading pass moves the accuracy figure by up
 to 10 points, which is why the table reports the mean of three and the wrong-answer
-ranges (45–50% / 15–25% / 12–12%) do not overlap where it matters.
+ranges (42-50% / 20-25% / 5-12%) do not overlap where it matters.
 
 Read it as a comparison between the rows, not as an absolute pass rate: the
 questions were picked to be ones a stale answer gets wrong. An earlier version of

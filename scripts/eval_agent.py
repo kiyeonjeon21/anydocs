@@ -26,9 +26,10 @@ Three claims died getting here, all of them n=1, all of them mine:
 
 Arm 3 answers the question the other three raise. A mounted server the agent never
 calls is worth nothing: arm 2 answered from memory on 2 runs in 40 and was wrong on
-both - asked for Claude Code's permission modes it replied in ONE turn, named four,
-and missed `auto` and `dontAsk`. The AGENTS.md line takes that to zero, and the
-README has to tell every user to paste it by hand.
+both - asked how to run Codex against Ollama it replied in ONE turn with the
+superseded `model_provider` + `[model_providers.*]` schema instead of `--oss` and
+`oss_provider`. The AGENTS.md line takes that to zero, and the README has to tell
+every user to paste it by hand.
 
 **Why naming the products is the variant worth testing.** A behavioural canary on
 Claude Code 2.1.220 ("begin every reply with <token>", then a question needing no
@@ -39,8 +40,8 @@ source names are injected into those deferred schemas, so at the moment the agen
 decides whether to search, nothing has told it this server covers Claude Code.
 SERVER_INSTRUCTIONS is the only channel that can fix that.
 
-**It does not work.** At n=40 arm 3 lands exactly on the bare server - 21% wrong
-against 21%, while the AGENTS.md line is 12%. The channel is not the problem; the
+**It does not work.** At n=40 arm 3 lands exactly on the bare server - 22% wrong
+against 22%, while the AGENTS.md line is 8%. The channel is not the problem; the
 canary proves this text reaches the model and drives behaviour. More of it is. An
 MCP server's instructions and a project's CLAUDE.md are different authorities, and
 the README's Step 2 stays.
@@ -82,7 +83,17 @@ from pathlib import Path
 OUT = Path("build/agent_eval")
 WORKERS = 6
 
-# (source, question, verified key). Every key was read off the live docs.
+# (source, question, verified key). Every key is checked against the indexed body of
+# the page that owns it, not recalled.
+#
+# One of these was wrong for a whole benchmark run, and it is the failure mode to
+# watch for: the xai key demanded `x_search` for a question about *web* search.
+# `web_search` and `x_search` are separate tools on separate pages, so the key was
+# punishing answers that were precisely right, and punishing the fastest arm hardest
+# because a fast answer answers the question asked and stops. It also claimed
+# `search_parameters` was "marked DEPRECATED", which appears nowhere in the corpus.
+# **A key that demands more than the question asked reads as rigour and scores as
+# noise.** Re-verify against the page before trusting a number that rests on it.
 QUESTIONS = [
     ("codex", "Does OpenAI Codex (the CLI) support lifecycle hooks? Name the events and the config file.",
      "10 events: SessionStart SubagentStart PreToolUse PermissionRequest PostToolUse PreCompact "
@@ -123,9 +134,11 @@ QUESTIONS = [
      "WRONG — the file silently never loads."),
     ("xai", "Using the xAI API, how do I turn on Grok's built-in web search? Give the exact parameter "
      "names.",
-     "The agentic `web_search` / `x_search` tools passed in `tools` on /v1/responses. Params: "
-     "allowed_domains / excluded_domains (max 5). The older Chat-Completions `search_parameters` with "
-     "`sources` is marked DEPRECATED, not removed."),
+     "The server-side `web_search` tool, passed in the `tools` array on /v1/responses "
+     "(`xai_sdk.tools.web_search()`; `xai.tools.webSearch()` in the Vercel AI SDK). Params: "
+     "`allowed_domains` and `excluded_domains` (max 5 each), `enable_image_understanding`, "
+     "`enable_image_search`. `x_search` is a SEPARATE tool for X posts and is NOT required here; "
+     "an answer is not incomplete for omitting it."),
 ]
 
 REPO = Path(__file__).resolve().parent.parent

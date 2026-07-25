@@ -49,17 +49,28 @@ n=40 per arm, `--reps 4 --passes 3`:
 
 | | wrong answers | accuracy | wall | answered from memory |
 | --- | --- | --- | --- | --- |
-| Claude Code alone | 48% | 0.44 | 53s | 10/40 |
-| \+ anydocs | 21% | 0.67 | 34s | 2/40 |
-| \+ anydocs, with the five products named in `SERVER_INSTRUCTIONS` | 21% | 0.59 | 32s | 2/40 |
-| \+ anydocs + the README's `AGENTS.md` line | **12%** | **0.69** | **30s** | **0/40** |
+| Claude Code alone | 46% | 0.48 | 53s | 10/40 |
+| \+ anydocs | 22% | 0.68 | 34s | 2/40 |
+| \+ anydocs, with the five products named in `SERVER_INSTRUCTIONS` | 22% | 0.69 | 32s | 2/40 |
+| \+ anydocs + the README's `AGENTS.md` line | **8%** | **0.81** | **30s** | **0/40** |
 
 **Most of the value is in one line of prose, not in the index.** With the server
-mounted and nothing telling it to search, the agent sometimes just answers — asked
-for Claude Code's permission modes it replied in a *single turn*, named four, and
-missed `auto` and `dontAsk`, with the answer one search away. The instruction takes
-that to zero, and it is also *faster*, because one search beats three guesses at a
-docs URL.
+mounted and nothing telling it to search, the agent sometimes just answers. Asked
+how to run Codex against Ollama, 2 of 4 such runs replied in a *single turn* with
+`model_provider` and a `[model_providers.*]` table: the superseded schema, laid out
+as a tidy TOML block a developer would paste. The current answer is `--oss` with
+`oss_provider`, one search away. The instruction takes that to zero, and it is also
+*faster*, because one search beats three guesses at a docs URL.
+
+**Pick demo and doc examples from the questions the tool actually decides, and
+check which those are.** Scoring each question by whether the answer carries the
+one token the current docs require: Ollama is the only one that goes from 0/4
+without the tool to 4/4 with it. Permission modes is 2/4 to 4/4. **Six of the ten
+questions plain Claude Code already gets right 4/4** - the headline is carried by a
+minority of the set, and an example picked by feel will usually land in that
+majority and demonstrate nothing. (An earlier version of this section claimed the
+permission-modes single-turn miss for the mounted-but-uninstructed arm; that arm
+answers it correctly 4/4 here. The anecdote came from the retired 26/20/6 run.)
 
 **And that line cannot be bought back from inside the server.** Row 3 is the whole
 of row 4's content moved into `SERVER_INSTRUCTIONS`, and it buys nothing - see the
@@ -180,7 +191,7 @@ Re-deriving them costs a day each.
 | Indexing `pages.description` as a fourth FTS field | It looks like a free win and it is a trap twice over. On the honest ruler it is worth **+1.8pp hit@1** — and on the auto set it reads as +10pp (0.876 → 0.976), because the auto set's *query is the description*. Indexing it **destroys the instrument**: 284 cases of eval, traded for 35 cases out of 1,956. |
 | **Any query-time signal that the eight rows are weak.** Four measured over 500 real questions, baseline hit@8 0.864 | None separates. **Per-row term coverage** (the best row's share of the query's terms) runs 0.79 → 0.89 across its whole range — the intuition is that OR scatters a bad query across rows that each match a different slice, and it is simply not true. **Top-row coverage**, same. **Union coverage — which is exactly the rescue's trigger — carries almost nothing**: 479 of 500 queries have every term covered somewhere, at the baseline hit rate. **BM25 margin** stayed dead, as the row below says it would. |
 | **Tightening the rescue's trigger to fire more** — testing the word against title/heading instead of the whole chunk | The obvious reading of "a caller routes on titles, so a word buried in a body never *reached* them", and it is a disaster: **291 fires over 500 questions, 246 of them at a caller who already had the answer.** It warns that `hook events list` does not contain `list` while handing back `en/hooks`. Content words live in bodies; that is what bodies are. `visible` (title + heading + the 200-char snippet the caller can actually see) is the principled version and it is no better — precision 0.023. Measured, all three, in `scripts/eval_rescue.py`. |
-| **Buying the AGENTS.md line back by writing it into `SERVER_INSTRUCTIONS`** - naming the five products there, since the `source` enum that names them is in the deferred schemas | **Lands exactly on the bare server: 21% wrong against 21%, while the AGENTS.md line is 12%** (`eval_agent.py`, n=40/arm). The channel is not the problem - the canary proves this text reaches the model and drives behaviour. *More of it* is. An MCP server's instructions and a project's `CLAUDE.md` are not the same authority, and no wording tested closes that. **At n=20 this read 15% and looked equal to the line**; doubling the sample reversed it. Three cases of 20 are not a product decision. |
+| **Buying the AGENTS.md line back by writing it into `SERVER_INSTRUCTIONS`** - naming the five products there, since the `source` enum that names them is in the deferred schemas | **Lands exactly on the bare server: 22% wrong against 22%, while the AGENTS.md line is 8%** (`eval_agent.py`, n=40/arm). The channel is not the problem - the canary proves this text reaches the model and drives behaviour. *More of it* is. An MCP server's instructions and a project's `CLAUDE.md` are not the same authority, and no wording tested closes that. **At n=20 this read 15% and looked equal to the line**; doubling the sample reversed it. Three cases of 20 are not a product decision. |
 | Raising `MIN_CHUNK` off the floor because it drops 369 sections | Almost all of what it drops is a JSX landing stub (`<CodexCliLanding />`). The real short sections it loses (`Vim editor mode`) are covered elsewhere in the corpus and still rank. Not a user-visible bug. Verify the claim before acting on it: a report that `PermissionBehavior` was unsearchable was simply wrong — it ranks first. |
 
 ## Retrieval changes need evidence
