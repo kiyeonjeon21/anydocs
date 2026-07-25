@@ -23,12 +23,23 @@ planted in each surface, then a question needing no tool, n=3 each way:
 | `SERVER_INSTRUCTIONS` (~100 tokens) | **yes** - fired 3/3 |
 | the five tool docstrings (~900 tokens) | **no** - 0/3. Schemas are deferred and arrive only after a tool search, which happens only once the model has already decided to use anydocs |
 
-So **`SERVER_INSTRUCTIONS` is the only text that can change *whether* a caller
-searches**; everything in a docstring can only change how well it searches once
-it already has. Note what that costs us: the `source` names injected into the
-tool schemas (`enum` + description) are on the *deferred* side, so at the moment
-an agent decides whether to search, nothing has told it this server covers Claude
-Code at all.
+So **`SERVER_INSTRUCTIONS` is the only text we ship that is in front of the model
+when it decides *whether* to search**; a docstring can only change how well it
+searches once it already has. Note what that costs us: the `source` names
+injected into the tool schemas (`enum` + description) are on the *deferred* side,
+so at the moment an agent decides whether to search, nothing has told it this
+server covers Claude Code at all.
+
+The deferral is not fixed. `"anthropic/alwaysLoad": true` in a tool's `_meta`
+un-defers it, and Claude Code respects it. **We do not use it**, because it was
+measured and it does not change what the model decides - see the rejected table.
+
+**Neither of the two surfaces we ship carries the weight the `AGENTS.md` line
+does, and that is now two experiments, not a guess.** Writing the line's content
+into `SERVER_INSTRUCTIONS` lands on the bare server (22% against 22%). Putting
+every docstring in context with `alwaysLoad` lands on the bare server too. The
+project-instruction channel has an authority ours does not, so **the README's
+Step 2 is not a documentation convenience, it is the product.**
 
 **Do not ask a model what is in its own context - it will confidently make it
 up.** Asked directly, it answered `ABSENT`, `NAME_ONLY` and `UNKNOWN`, and all
@@ -192,6 +203,7 @@ Re-deriving them costs a day each.
 | **Any query-time signal that the eight rows are weak.** Four measured over 500 real questions, baseline hit@8 0.864 | None separates. **Per-row term coverage** (the best row's share of the query's terms) runs 0.79 → 0.89 across its whole range — the intuition is that OR scatters a bad query across rows that each match a different slice, and it is simply not true. **Top-row coverage**, same. **Union coverage — which is exactly the rescue's trigger — carries almost nothing**: 479 of 500 queries have every term covered somewhere, at the baseline hit rate. **BM25 margin** stayed dead, as the row below says it would. |
 | **Tightening the rescue's trigger to fire more** — testing the word against title/heading instead of the whole chunk | The obvious reading of "a caller routes on titles, so a word buried in a body never *reached* them", and it is a disaster: **291 fires over 500 questions, 246 of them at a caller who already had the answer.** It warns that `hook events list` does not contain `list` while handing back `en/hooks`. Content words live in bodies; that is what bodies are. `visible` (title + heading + the 200-char snippet the caller can actually see) is the principled version and it is no better — precision 0.023. Measured, all three, in `scripts/eval_rescue.py`. |
 | **Buying the AGENTS.md line back by writing it into `SERVER_INSTRUCTIONS`** - naming the five products there, since the `source` enum that names them is in the deferred schemas | **Lands exactly on the bare server: 22% wrong against 22%, while the AGENTS.md line is 8%** (`eval_agent.py`, n=40/arm). The channel is not the problem - the canary proves this text reaches the model and drives behaviour. *More of it* is. An MCP server's instructions and a project's `CLAUDE.md` are not the same authority, and no wording tested closes that. **At n=20 this read 15% and looked equal to the line**; doubling the sample reversed it. Three cases of 20 are not a product decision. |
+| **Buying the AGENTS.md line back with `"anthropic/alwaysLoad": true`** in each tool's `_meta`, which un-defers the schemas and puts all ~900 tokens of docstrings in context from turn one | It is real, it works, and it does not move the thing that matters. On the Ollama question, which is the one question in the eval that the tool actually decides: **skipped the search 2 of 6, against 2 of 4 for the bare server and 0 of 4 with the line.** Two runs answered in ONE turn, in 10 seconds, with every docstring in front of them saying to search first. A $2 screen on turn counts, no judge, killed it (`git log`). Note the price even if it had won: ~900 tokens every session against ~30 for the line. |
 | Raising `MIN_CHUNK` off the floor because it drops 369 sections | Almost all of what it drops is a JSX landing stub (`<CodexCliLanding />`). The real short sections it loses (`Vim editor mode`) are covered elsewhere in the corpus and still rank. Not a user-visible bug. Verify the claim before acting on it: a report that `PermissionBehavior` was unsearchable was simply wrong — it ranks first. |
 
 ## Retrieval changes need evidence
