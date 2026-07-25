@@ -32,14 +32,23 @@ from anydocs.query import search
 
 HAND_MIN_AT1 = 10
 HAND_MIN_AT3 = 12
-# Baseline on the complete 2026-07-14 corpus is 0.792 / 0.847. A 0.01 margin
-# ignores a couple of moving-doc cases but still catches broad ranking damage.
-AUTO_MIN_AT1 = 0.782
-AUTO_MIN_MRR = 0.837
-# Baseline 0.897 on the same corpus. Recall is what search_docs' eight rows are
-# for, and it is the number that moves when a slot is wasted: page-level dedup
-# lifted this from 0.859 by spending the duplicate rows on new pages instead.
-ANCHOR_MIN_RECALL8 = 0.880
+# The corpus is re-fetched daily, and this number drifts with it on its own:
+# 0.792 / 0.847 on 2026-07-14, then 0.780, 0.778, 0.784 over the next eleven
+# days with no code change at all. A 0.01 margin was inside that band, so the
+# daily sync hard-failed twice on pure drift and froze the published index for
+# six days (git log eb0efee). The margin has to cover the drift, not sit in it.
+#
+# It costs nothing to widen, because this gate cannot resolve small differences
+# anyway: the entire BM25 field-weight grid moves hit@1 only 0.775-0.804. What
+# it catches is broad damage - a query path that stops matching, a chunker that
+# drops sections - and that lands far below any floor here.
+AUTO_MIN_AT1 = 0.760
+AUTO_MIN_MRR = 0.820
+# Baseline 0.897 on the same corpus, drifting to 0.891-0.892 since. Recall is
+# what search_docs' eight rows are for, and it is the number that moves when a
+# slot is wasted: page-level dedup lifted this from 0.859 by spending the
+# duplicate rows on new pages instead. Same drift margin as the auto floors.
+ANCHOR_MIN_RECALL8 = 0.865
 
 
 @dataclass

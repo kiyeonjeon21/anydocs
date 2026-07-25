@@ -56,13 +56,26 @@ GREP_PER_PAGE = 3
 GREP_MAX_COLS = 200
 SEARCH_MAX_RESULTS = 8
 
-SERVER_INSTRUCTIONS = """Search indexed product documentation with search_docs before
+# Measured with a behavioural canary on Claude Code 2.1.220 ("start every reply
+# with <token>", asked a question needing no tool, n=3 each way): this text is in
+# the model's context from the first turn, and the five tool docstrings are NOT -
+# their schemas are deferred and arrive only after the model runs a tool search,
+# which it does only once it has already decided to use anydocs. So this string
+# is the only thing that can change *whether* a caller searches. Everything else
+# we write can only change how well it searches once it already has.
+#
+# That makes this the highest-leverage text in the project, so it has to be
+# measurable: scripts/eval_agent.py sets the override to A/B a variant against
+# the default. Nothing else sets it.
+DEFAULT_INSTRUCTIONS = """Search indexed product documentation with search_docs before
 answering documentation questions. Pass source when the product is known, use concise
 English keywords, then call read_doc on the relevant paths. Treat WARNING and NOTE as
 incomplete evidence: follow rescued and related pages before concluding that a feature
 does not exist. A search costs ~500 tokens, so budget for two: if the rows do not cohere
 around the question, search again with the name the docs would use for the thing rather
 than the words you would. Use grep_docs only for exact regex lookup after search_docs."""
+
+SERVER_INSTRUCTIONS = os.environ.get("ANYDOCS_INSTRUCTIONS") or DEFAULT_INSTRUCTIONS
 
 READ_ONLY_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
