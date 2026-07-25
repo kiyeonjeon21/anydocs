@@ -54,12 +54,19 @@ jobs:
           fi
           jq -e '.healthy == true' build/manifest.json > /dev/null
 
-      - name: Gate retrieval quality
+      # These two are hard gates in ci.yml, where the diff is code and a drop
+      # convicts the change. Here the code is fixed and only the upstream docs
+      # moved, so a red gate would freeze the index on exactly the day the docs
+      # changed most — the opposite of this job's purpose. Report, don't block.
+      - name: Retrieval quality (advisory)
+        continue-on-error: true
         run: uv run python scripts/eval_search.py --verbose
 
-      - name: Verify anchors against the live sites
+      - name: Verify anchors against the live sites (advisory)
         # A wrong heading slug is a link that quietly lands on the wrong place;
-        # nothing else in the pipeline would ever notice, so check it here.
+        # worth surfacing, but a heading the upstream site renamed is their
+        # change, not our regression, and must not stop a publish.
+        continue-on-error: true
         run: uv run python scripts/verify_anchors.py
 
       - name: Compare against the published index

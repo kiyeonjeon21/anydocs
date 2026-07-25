@@ -16,13 +16,12 @@ from pathlib import Path
 
 import httpx
 
-from anydocs.chunk import anchor_slug
+from anydocs.chunk import anchor_slug, iter_headings
 from anydocs.models import Source
 
 ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "build" / "anydocs.db"
 ID_RE = re.compile(r'id="([^"]+)"')
-HEADING_RE = re.compile(r"^#{2,3}\s+(.+?)\s*$", re.MULTILINE)
 PER_SOURCE = 6
 
 
@@ -36,7 +35,12 @@ async def check(
         return 0, [f"fetch failed: {exc}"]
 
     live = set(ID_RE.findall(resp.text))
-    wanted = [anchor_slug(m.group(1), style) for m in HEADING_RE.finditer(body)]
+    # A heading inside a fenced ```md example is not a real anchor. Codex's
+    # agents-md page shows a `## Code Review Rules` block by example, and a
+    # fence-blind scan reported both it and its `### Experiment cohorts` child
+    # as broken every day. iter_headings skips fences, exactly as the chunker
+    # that built these anchors does, so the two never disagree.
+    wanted = [anchor_slug(text, style) for _, text in iter_headings(body, 2, 3)]
     if not live & set(wanted) and wanted:
         # cursor.com/docs renders headings client-side, so no heading carries an
         # id in the served HTML and there is nothing here to compare against.

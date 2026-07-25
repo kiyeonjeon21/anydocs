@@ -18,3 +18,8 @@ jobs:
         run: uv run anydocs-build
       - name: Gate retrieval quality
         run: uv run python scripts/eval_search.py --verbose
+      - name: Verify anchors against the live sites
+        # Hard gate here, advisory in sync.yml: on a PR the diff is code, so a
+        # broken slug convicts the change; in the daily sync only the upstream
+        # docs moved, and that must not block a publish.
+        run: uv run python scripts/verify_anchors.py
