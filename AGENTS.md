@@ -14,6 +14,26 @@ five tool docstrings in `server.py` — about 1,000 tokens, and the only guidanc
 caller will ever see. So a lesson that should change how a **caller** behaves has
 to be written *there*. Writing it down here reaches nobody but us.
 
+**And those 1,000 tokens are not one channel, they are two.** Measured with a
+behavioural canary on Claude Code 2.1.220 - "begin every reply with `<token>`"
+planted in each surface, then a question needing no tool, n=3 each way:
+
+| | in context before the model decides to search? |
+| --- | --- |
+| `SERVER_INSTRUCTIONS` (~100 tokens) | **yes** - fired 3/3 |
+| the five tool docstrings (~900 tokens) | **no** - 0/3. Schemas are deferred and arrive only after a tool search, which happens only once the model has already decided to use anydocs |
+
+So **`SERVER_INSTRUCTIONS` is the only text that can change *whether* a caller
+searches**; everything in a docstring can only change how well it searches once
+it already has. Note what that costs us: the `source` names injected into the
+tool schemas (`enum` + description) are on the *deferred* side, so at the moment
+an agent decides whether to search, nothing has told it this server covers Claude
+Code at all.
+
+**Do not ask a model what is in its own context - it will confidently make it
+up.** Asked directly, it answered `ABSENT`, `NAME_ONLY` and `UNKNOWN`, and all
+three were wrong. Only the behavioural canary is evidence.
+
 Keep this file to rules — the things a future session must not get wrong. The
 story of how each rule was found is in `git log`, where the commit messages run to
 forty lines and cost nothing to carry.
@@ -25,11 +45,14 @@ whether any of it reaches a user, by running a real Claude Code — **WebFetch a
 WebSearch enabled in every arm**, because that is what the user already has — and
 grading the final answer blind against docs-verified keys.
 
+n=40 per arm, `--reps 4 --passes 3`:
+
 | | wrong answers | accuracy | wall | answered from memory |
 | --- | --- | --- | --- | --- |
-| Claude Code alone (n=80) | 26% | 0.63 | 51s | 2/80 |
-| \+ anydocs (n=80) | 20% | 0.70 | 44s | 2/80 |
-| \+ anydocs + the README's `AGENTS.md` line (n=60) | **6%** | **0.78** | **27s** | **0/60** |
+| Claude Code alone | 48% | 0.44 | 53s | 10/40 |
+| \+ anydocs | 21% | 0.67 | 34s | 2/40 |
+| \+ anydocs, with the five products named in `SERVER_INSTRUCTIONS` | 21% | 0.59 | 32s | 2/40 |
+| \+ anydocs + the README's `AGENTS.md` line | **12%** | **0.69** | **30s** | **0/40** |
 
 **Most of the value is in one line of prose, not in the index.** With the server
 mounted and nothing telling it to search, the agent sometimes just answers — asked
@@ -38,9 +61,18 @@ missed `auto` and `dontAsk`, with the answer one search away. The instruction ta
 that to zero, and it is also *faster*, because one search beats three guesses at a
 docs URL.
 
-So: a lesson about how a caller should behave is worth nothing here. It has to reach
-`SERVER_INSTRUCTIONS`, the tool docstrings, or that README line. Those are the only
-things a user ever sees.
+**And that line cannot be bought back from inside the server.** Row 3 is the whole
+of row 4's content moved into `SERVER_INSTRUCTIONS`, and it buys nothing - see the
+rejected table. Server instructions and a project's `CLAUDE.md` are different
+authorities, and the README's Step 2 is load-bearing because of it.
+
+**These numbers replace an earlier 26 / 20 / 6 table.** That one was graded by a
+throwaway script in a scratchpad, and it does not survive its own author: nothing
+in the repo reproduces it, and `eval_agent.py`'s grading path had never once run
+end to end - it scanned raw `--output-format json` for line-anchored verdicts,
+matched none, and printed a headed table with no rows under it. Quote only what
+the checked-in script prints. The ordering and the conclusion are unchanged; the
+absolute rates are not comparable across the two.
 
 Three claims died getting to this table, all n=1, all mine: *the model doesn't know*
 (give it WebFetch and it finds out), *it says 9 and there are 20* (there are **30** —
@@ -148,6 +180,7 @@ Re-deriving them costs a day each.
 | Indexing `pages.description` as a fourth FTS field | It looks like a free win and it is a trap twice over. On the honest ruler it is worth **+1.8pp hit@1** — and on the auto set it reads as +10pp (0.876 → 0.976), because the auto set's *query is the description*. Indexing it **destroys the instrument**: 284 cases of eval, traded for 35 cases out of 1,956. |
 | **Any query-time signal that the eight rows are weak.** Four measured over 500 real questions, baseline hit@8 0.864 | None separates. **Per-row term coverage** (the best row's share of the query's terms) runs 0.79 → 0.89 across its whole range — the intuition is that OR scatters a bad query across rows that each match a different slice, and it is simply not true. **Top-row coverage**, same. **Union coverage — which is exactly the rescue's trigger — carries almost nothing**: 479 of 500 queries have every term covered somewhere, at the baseline hit rate. **BM25 margin** stayed dead, as the row below says it would. |
 | **Tightening the rescue's trigger to fire more** — testing the word against title/heading instead of the whole chunk | The obvious reading of "a caller routes on titles, so a word buried in a body never *reached* them", and it is a disaster: **291 fires over 500 questions, 246 of them at a caller who already had the answer.** It warns that `hook events list` does not contain `list` while handing back `en/hooks`. Content words live in bodies; that is what bodies are. `visible` (title + heading + the 200-char snippet the caller can actually see) is the principled version and it is no better — precision 0.023. Measured, all three, in `scripts/eval_rescue.py`. |
+| **Buying the AGENTS.md line back by writing it into `SERVER_INSTRUCTIONS`** - naming the five products there, since the `source` enum that names them is in the deferred schemas | **Lands exactly on the bare server: 21% wrong against 21%, while the AGENTS.md line is 12%** (`eval_agent.py`, n=40/arm). The channel is not the problem - the canary proves this text reaches the model and drives behaviour. *More of it* is. An MCP server's instructions and a project's `CLAUDE.md` are not the same authority, and no wording tested closes that. **At n=20 this read 15% and looked equal to the line**; doubling the sample reversed it. Three cases of 20 are not a product decision. |
 | Raising `MIN_CHUNK` off the floor because it drops 369 sections | Almost all of what it drops is a JSX landing stub (`<CodexCliLanding />`). The real short sections it loses (`Vim editor mode`) are covered elsewhere in the corpus and still rank. Not a user-visible bug. Verify the claim before acting on it: a report that `PermissionBehavior` was unsearchable was simply wrong — it ranks first. |
 
 ## Retrieval changes need evidence

@@ -31,22 +31,24 @@ Code, **with WebFetch and WebSearch enabled in every arm**: the control is not a
 model with its hands tied, it is what you already have. Answers graded blind
 against the key, three independent passes.
 
-| | wrong answers | accuracy | wall | cost |
+| | wrong answers | accuracy | wall | answered from memory |
 | --- | --- | --- | --- | --- |
-| Claude Code alone (n=80) | **26%** | 0.63 | 51s | $0.311 |
-| \+ anydocs (n=80) | 20% | 0.70 | 44s | $0.319 |
-| **\+ anydocs + the `AGENTS.md` line below (n=60)** | **6%** | **0.78** | **27s** | **$0.275** |
+| Claude Code alone | **48%** | 0.44 | 53s | 10/40 |
+| \+ anydocs | 21% | 0.67 | 34s | 2/40 |
+| **\+ anydocs + the `AGENTS.md` line below** | **12%** | **0.69** | **30s** | **0/40** |
 
-**Four times fewer wrong answers — and it is faster and cheaper at the same time.**
+**Four times fewer wrong answers - and it is faster at the same time.** Reproduce
+it with `uv run python scripts/eval_agent.py --reps 4 --passes 3` (40 runs per arm).
 
 The middle row is the point. **Mounting the server is not enough.** With anydocs
 available but nothing telling the agent to use it, it sometimes just answers from
 memory — and when it does, it is wrong: asked for Claude Code's permission modes it
 replied in a single turn, named four, and missed `auto` and `dontAsk`. One line of
-instruction takes the skip rate to zero, and it is the difference between 20% wrong
-and 6%.
+instruction takes that to zero, and it is the difference between 21% wrong and 12%.
 
-So the line is not optional. It is in both install paths below.
+So the line is not optional. It is in both install paths below. And it cannot be
+moved inside the server: writing the same instruction into the MCP server's own
+instructions was measured, and it lands exactly on the middle row.
 
 ## Install
 
@@ -115,9 +117,9 @@ then read_doc before answering questions about that product's documentation.
 
 **Do not skip this.** A mounted MCP server the agent does not call is worth
 nothing, and an agent that feels sure will answer from memory instead — which is
-exactly when it is wrong. Measured over 140 runs, this line takes the
-answer-from-memory rate to **zero**, cuts wrong answers from **20% to 6%**, and
-makes the agent *faster* (27s against 44s), because one search beats three
+exactly when it is wrong. Measured over 160 runs, this line takes the
+answer-from-memory rate to **zero**, cuts wrong answers from **21% to 12%**, and
+makes the agent *faster* (30s against 34s), because one search beats three
 guesses at a docs URL.
 
 ## Scoping a project to the docs it uses
@@ -246,7 +248,17 @@ supposed to own. It says nothing about a question with no documented answer, and
 model that already knows React does not need this. Answers were graded by an LLM
 against a hand-verified key; a single grading pass moves the accuracy figure by up
 to 10 points, which is why the table reports the mean of three and the wrong-answer
-ranges (25–29% / 18–21% / 5–8%) do not overlap where it matters.
+ranges (45–50% / 15–25% / 12–12%) do not overlap where it matters.
+
+Read it as a comparison between the rows, not as an absolute pass rate: the
+questions were picked to be ones a stale answer gets wrong. An earlier version of
+this table reported 26 / 20 / 6 from a grader that no longer exists; these numbers
+come from the checked-in script, whose grading path turned out never to have run
+end to end. Trust only what you can re-run.
+
+The sample size is load-bearing, not decoration. A variant tested at 20 runs per
+arm looked like it matched the `AGENTS.md` line; at 40 it was no better than not
+having it. Halve the runs and this table will happily tell you something false.
 
 ## License
 

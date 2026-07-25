@@ -1,4 +1,4 @@
-"""Does anydocs make a real agent get the answer right? Three arms, graded blind.
+"""Does anydocs make a real agent get the answer right? Four arms, graded blind.
 
 Every other ruler here scores retrieval — did the eight rows contain the page. This
 one scores the thing a user actually cares about: **was the answer right**, at the
@@ -16,15 +16,38 @@ Three claims died getting here, all of them n=1, all of them mine:
 
 ## The arms
 
-  plain        Claude Code, WebFetch and WebSearch enabled. **The control is not a
-               model with its hands tied — it is what the user already has.**
-  anydocs      the same, with the MCP server mounted and nothing else.
-  anydocs+md   the same, plus the one line the README tells you to put in AGENTS.md.
+  plain         Claude Code, WebFetch and WebSearch enabled. **The control is not a
+                model with its hands tied - it is what the user already has.**
+  anydocs       the same, with the MCP server mounted and nothing else.
+  anydocs+named the same, with SERVER_INSTRUCTIONS replaced by a variant that names
+                the five indexed products and says to search before answering.
+  anydocs+md    stock server, plus the one line the README tells you to put in
+                AGENTS.md.
 
-The third arm is the point. A mounted server the agent never calls is worth nothing:
-arm 2 answered from memory on 2 runs in 80 and was wrong on both — asked for Claude
-Code's permission modes it replied in ONE turn, named four, and missed `auto` and
-`dontAsk`. The instruction takes that to zero.
+Arm 3 answers the question the other three raise. A mounted server the agent never
+calls is worth nothing: arm 2 answered from memory on 2 runs in 40 and was wrong on
+both - asked for Claude Code's permission modes it replied in ONE turn, named four,
+and missed `auto` and `dontAsk`. The AGENTS.md line takes that to zero, and the
+README has to tell every user to paste it by hand.
+
+**Why naming the products is the variant worth testing.** A behavioural canary on
+Claude Code 2.1.220 ("begin every reply with <token>", then a question needing no
+tool, n=3 each way) shows SERVER_INSTRUCTIONS is in context from turn one and the
+five tool docstrings are *not* - their schemas are deferred until the model runs a
+tool search, which happens only after it has already decided to use anydocs. The
+source names are injected into those deferred schemas, so at the moment the agent
+decides whether to search, nothing has told it this server covers Claude Code.
+SERVER_INSTRUCTIONS is the only channel that can fix that.
+
+**It does not work.** At n=40 arm 3 lands exactly on the bare server - 21% wrong
+against 21%, while the AGENTS.md line is 12%. The channel is not the problem; the
+canary proves this text reaches the model and drives behaviour. More of it is. An
+MCP server's instructions and a project's CLAUDE.md are different authorities, and
+the README's Step 2 stays.
+
+**Do not read this eval at 20 runs an arm.** At n=20 arm 3 read 15% and looked
+level with the AGENTS.md line, which would have taken Step 2 out of the README.
+Doubling the sample reversed it. Three cases out of twenty is not a decision.
 
 ## Grading
 
@@ -37,7 +60,7 @@ developer acting on a wrong answer is the whole cost.
 Questions are config surface that has changed recently. That is the ground a docs
 tool should own; it says nothing about a question with no documented answer.
 
-    uv run python scripts/eval_agent.py --reps 2 --passes 3
+    uv run python scripts/eval_agent.py --reps 4 --passes 3
 
 Costs real money (~$0.30 a run) and needs the `claude` CLI on PATH. Not in CI.
 """
@@ -105,13 +128,40 @@ QUESTIONS = [
      "`sources` is marked DEPRECATED, not removed."),
 ]
 
-MCP_ON = json.dumps({"mcpServers": {"anydocs": {
-    "command": "uvx",
-    "args": ["--from", "git+https://github.com/kiyeonjeon21/anydocs", "anydocs"],
-}}})
-MCP_OFF = json.dumps({"mcpServers": {}})
+REPO = Path(__file__).resolve().parent.parent
 
-# Verbatim from the README. The whole third arm is this string.
+
+def _mcp(env: dict[str, str] | None = None) -> str:
+    # The local checkout, not `uvx --from git+...` as the README shows. uvx caches
+    # a resolved revision, and an arm that silently ran last week's server would
+    # confound the one variable this eval exists to move.
+    server: dict = {"command": "uv", "args": ["run", "--directory", str(REPO), "anydocs"]}
+    if env:
+        server["env"] = env
+    return json.dumps({"mcpServers": {"anydocs": server}})
+
+
+MCP_OFF = json.dumps({"mcpServers": {}})
+MCP_ON = _mcp()
+
+# The arm-3 variant. Names the five products, because the `source` enum that names
+# them lives in the deferred tool schemas and has not reached the model yet when it
+# decides whether to search at all. Ships hardcoded here on purpose: this is one
+# literal string in an A/B, and if it wins the shipped version should build the list
+# from the enabled sources the way the enum already does.
+MCP_NAMED = _mcp({"ANYDOCS_INSTRUCTIONS": """This server indexes the complete, current
+documentation for five developer tools: claude-code (Claude Code), codex (OpenAI Codex),
+cursor (Cursor), opencode, and xai (xAI / Grok). These products ship changes every week
+and your memory of them is out of date. So if a question touches any of them, call
+search_docs BEFORE you answer, including when you are confident you already know.
+Pass source, use concise English keywords, then call read_doc on the paths it returns.
+Treat WARNING and NOTE as incomplete evidence: follow rescued and related pages before
+concluding that a feature does not exist. A search costs ~500 tokens, so budget for two:
+if the rows do not cohere around the question, search again with the name the docs would
+use for the thing rather than the words you would. Use grep_docs only for exact regex
+lookup after search_docs."""})
+
+# Verbatim from the README. The whole fourth arm is this string.
 AGENTS_MD = """# Project
 
 When the anydocs MCP server is available, use `search_docs` with the product's
@@ -119,7 +169,12 @@ source and then `read_doc` before answering questions about that product's
 documentation.
 """
 
-ARMS = {"plain": (MCP_OFF, False), "anydocs": (MCP_ON, False), "anydocs+md": (MCP_ON, True)}
+ARMS = {
+    "plain": (MCP_OFF, False),
+    "anydocs": (MCP_ON, False),
+    "anydocs+named": (MCP_NAMED, False),
+    "anydocs+md": (MCP_ON, True),
+}
 
 GRADE = """You are grading answers about developer-tool documentation.
 
@@ -198,7 +253,16 @@ def grade_pass(recs, seed: str, keys) -> dict[int, tuple[str, str]]:
             for n, (_, r) in enumerate(batch, 1)
         )
         with tempfile.TemporaryDirectory() as cwd:
-            out = _claude(GRADE.format(items=items), MCP_OFF, cwd, model="sonnet", tools=False)
+            raw = _claude(GRADE.format(items=items), MCP_OFF, cwd, model="sonnet", tools=False)
+        # _claude asks for --output-format json, so the verdicts are inside the
+        # "result" string with their newlines escaped. Scanning the raw stdout
+        # for line-anchored verdicts matches nothing at all and every arm is
+        # silently dropped from the table as "no verdicts" - which is exactly
+        # what this did the first time it was run end to end.
+        try:
+            out = json.loads(raw, strict=False).get("result", "")
+        except Exception:  # noqa: BLE001
+            return {}
         got = {}
         for line in out.splitlines():
             if (m := VERDICT.match(line)) and 1 <= int(m[1]) <= len(batch):
@@ -261,6 +325,10 @@ def main() -> int:
     print(f"  {'arm':12}{'accuracy':>22}{'WRONG — the one that costs':>30}")
     for arm in ARMS:
         if not acc[arm]:
+            # A quiet `continue` here prints a headed table with no rows under
+            # it, which reads as "nothing to report" rather than "the judge
+            # returned nothing I could parse". Say which.
+            print(f"  {arm:12}  NO VERDICTS PARSED - the grader output did not match VERDICT")
             continue
         a, w = acc[arm], wrong[arm]
         print(f"  {arm:12}{statistics.mean(a):>10.2f}  [{min(a):.2f}-{max(a):.2f}]"
