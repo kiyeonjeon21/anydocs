@@ -1,5 +1,8 @@
 # anydocs
 
+[![ci](https://github.com/kiyeonjeon21/anydocs/actions/workflows/ci.yml/badge.svg)](https://github.com/kiyeonjeon21/anydocs/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An MCP server that gives coding agents fast search over other tools'
 documentation — Claude Code, OpenAI Codex, Cursor, opencode, xAI, and whatever
 else you add.
@@ -21,6 +24,14 @@ it cheap enough to check *every time* instead of guessing.
 
 Everything runs locally: no API key, no network at query time, no service to keep
 alive. The whole index is ~7 MB.
+
+## Demo
+
+https://github.com/user-attachments/assets/45815084-b225-4559-9b65-ab2e00c0e656
+
+A real, unscripted Claude Code session: the Codex/Ollama question from the table
+below, a follow-up that hits a 49KB doc page and asks for the right section
+instead of guessing, and an answer that ends on a cited source line - not memory.
 
 ## Does it help? Measured.
 

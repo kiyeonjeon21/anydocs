@@ -1,0 +1,59 @@
+name: Bug report
+description: Something in the server, the index, or a search result is wrong.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what did you get instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Which doc source is this about (if any)
+      options:
+        - claude-code
+        - codex
+        - cursor
+        - opencode
+        - xai
+        - not source-specific / server itself
+    validations:
+      required: true
+
+  - type: textarea
+    id: query
+    attributes:
+      label: The tool call and query, if this is a search/retrieval bug
+      description: The `search_docs`, `read_doc`, or `grep_docs` arguments that produced the bad result. Exact wording matters a lot here.
+      render: json
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual result
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: anydocs version / commit
+      description: From `codex mcp list`, the server startup log, or `git rev-parse HEAD` if running from source.
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, and which agent/client you're running (Claude Code, Codex, Cursor, opencode, etc).
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the "Known, and not fixed" section of AGENTS.md — this isn't already a documented limitation.
+          required: true

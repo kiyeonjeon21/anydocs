@@ -1,0 +1,37 @@
+name: New documentation source request
+description: Ask for (or propose) a new doc site to index — e.g. another coding agent or dev tool.
+labels: ["source request"]
+body:
+  - type: input
+    id: site
+    attributes:
+      label: Docs site
+      description: The base URL of the documentation you want indexed.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: strategy
+    attributes:
+      label: Ingest strategy, if you know it
+      description: See the "Adding a source" section of AGENTS.md. Leave as "not sure" if you haven't checked.
+      options:
+        - llms-txt (site publishes an llms.txt)
+        - sitemap (crawl via sitemap.xml)
+        - llms-full (single llms-full.txt dump)
+        - not sure
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this source
+      description: What would you use it for? A concrete question you'd ask it helps more than a general "would be nice."
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: pr
+    attributes:
+      label: Contributing it yourself
+      options:
+        - label: I'd like to submit the sources/*.yaml myself (see CONTRIBUTING.md and AGENTS.md's "Adding a source" section)
