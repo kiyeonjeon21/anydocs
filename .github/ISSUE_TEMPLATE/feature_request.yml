@@ -1,0 +1,26 @@
+name: Feature request
+description: A change to the server, its tools, or its behavior that isn't a new doc source or a bug.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: What are you trying to do, and where does anydocs currently fall short?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: If this is about search quality or ranking, I checked the "Do not retry these" table in AGENTS.md — this isn't an idea that was already measured and rejected.
+          required: true
+        - label: If this is a request for a new doc source, I used the "New documentation source request" template instead.
+          required: true

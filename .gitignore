@@ -3,7 +3,10 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+dist/
 .claude/dist/
 media/
 .claude/settings.json
 .codex/config.toml
+.DS_Store
