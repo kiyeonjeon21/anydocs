@@ -27,7 +27,7 @@ alive. The whole index is ~7 MB.
 
 ## Demo
 
-https://github.com/user-attachments/assets/45815084-b225-4559-9b65-ab2e00c0e656
+https://github.com/user-attachments/assets/c900ff65-885c-46fe-a7fc-14486391cc00
 
 A real, unscripted Claude Code session: the Codex/Ollama question from the table
 below, a follow-up that hits a 49KB doc page and asks for the right section
