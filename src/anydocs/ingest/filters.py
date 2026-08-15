@@ -34,11 +34,26 @@ def clean_body(body: str) -> str:
     lines = body.splitlines()
     first_h1 = next((i for i, ln in enumerate(lines) if TITLE_RE.match(ln)), None)
     if first_h1 is None:
-        return body.strip()
-    preamble = lines[:first_h1]
-    if preamble and all(not ln.strip() or ln.lstrip().startswith(">") for ln in preamble):
-        lines = lines[first_h1:]
-    return "\n".join(lines).strip()
+        body = body.strip()
+    else:
+        preamble = lines[:first_h1]
+        if preamble and all(not ln.strip() or ln.lstrip().startswith(">") for ln in preamble):
+            lines = lines[first_h1:]
+        body = "\n".join(lines).strip()
+
+    # A closing "## Sitemap" -> llms.txt link, confirmed on 174/174 cursor
+    # pages, sometimes preceded by a templated "{X} is available on the
+    # {plan} plan / Contact our team..." CTA (13/174) using the same "---"
+    # divider. Neither carries a live `id=` (the site's footer is a shared
+    # nav component, not rendered from these headings), so both the anchor
+    # and the CTA line are cut with it rather than shipped as dead-anchor
+    # search results.
+    sitemap_idx = body.find("\n## Sitemap\n")
+    if sitemap_idx != -1:
+        divider_idx = body.rfind("\n---\n", 0, sitemap_idx)
+        body = body[: divider_idx if divider_idx != -1 else sitemap_idx].rstrip()
+
+    return body
 
 
 def extract_title(body: str, fallback: str) -> str:

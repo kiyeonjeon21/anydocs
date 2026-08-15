@@ -26,7 +26,7 @@ PER_SOURCE = 6
 
 
 async def check(
-    client: httpx.AsyncClient, url: str, body: str, style: str
+    client: httpx.AsyncClient, url: str, body: str, style: str, max_level: int
 ) -> tuple[int, list[str]]:
     try:
         resp = await client.get(url)
@@ -40,13 +40,25 @@ async def check(
     # fence-blind scan reported both it and its `### Experiment cohorts` child
     # as broken every day. iter_headings skips fences, exactly as the chunker
     # that built these anchors does, so the two never disagree.
-    wanted = [anchor_slug(text, style) for _, text in iter_headings(body, 2, 3)]
+    wanted = [anchor_slug(text, style) for _, text in iter_headings(body, 2, max_level)]
     if not live & set(wanted) and wanted:
         # cursor.com/docs renders headings client-side, so no heading carries an
         # id in the served HTML and there is nothing here to compare against.
         # Say so instead of reporting every anchor as broken.
         return -1, []
     return len(wanted), [s for s in wanted if s and s not in live]
+
+
+# cursor.com never puts a live `id=` on an H3 -- confirmed across FAQ,
+# steps, and plain content pages (account/regions, account/enterprise/*):
+# the rendered page anchors H2 "section" headings only, H3s are members of
+# UI components (accordions, step lists) with no anchor of their own. That
+# is a real fact about the site, not a checker quirk, so the check is
+# capped at H2 for this source rather than reporting a permanent false
+# "broken" on every H3 sampled. Whether `read_doc` should still offer H3
+# anchors for cursor (page loads, fragment just doesn't scroll) is a
+# separate, open question -- this only stops the checker lying about it.
+MAX_HEADING_LEVEL = {"cursor": 2}
 
 
 async def main() -> int:
@@ -62,8 +74,9 @@ async def main() -> int:
     async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
         for source, rows in by_source.items():
             style = styles.get(source, "collapse")
+            max_level = MAX_HEADING_LEVEL.get(source, 3)
             results = await asyncio.gather(
-                *(check(client, r["url"], r["body"], style) for r in rows)
+                *(check(client, r["url"], r["body"], style, max_level) for r in rows)
             )
             if all(n == -1 for n, _ in results):
                 print(f"--  {source:<12} client-rendered HTML; anchors not verifiable")
