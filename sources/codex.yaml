@@ -3,21 +3,34 @@ title: OpenAI Codex
 tags: [coding-agent, openai]
 strategy: llms-txt
 entry: https://learn.chatgpt.com/llms.txt
-# The llms.txt links canonical developers.openai.com pages, but their `.md`
-# redirects are lossy for root and moved pages (`overview.md` -> `docs.md`). The
-# actual markdown twins consistently live at learn.chatgpt.com/docs/<path>.md.
-base_url: https://developers.openai.com/codex/
-fetch_base_url: https://learn.chatgpt.com/docs/
+# OpenAI consolidated onto learn.chatgpt.com/docs/ (checked 2026-08-15): the
+# entry's own links now point directly at this host, and
+# developers.openai.com/codex/* 308-redirects here instead of serving
+# canonically. Single host now -- the dual-host base_url/fetch_base_url split
+# this source used to need (index on one host, markdown twins on another) is
+# gone because both live in the same place today. This has moved before; if
+# ingest starts failing again, recheck with `curl -sIL <entry>` before assuming
+# the old split still applies.
+base_url: https://learn.chatgpt.com/docs/
 # The index opens with a "Documentation sets" group linking to whole-corpus
 # exports rather than pages; those would be indexed as one giant duplicate page.
+# The Guides/Learn/Overview/Resources/Videos sections link a handful of pages
+# hosted outside /docs/ (learn.chatgpt.com/guides/*, docs.md, resources.md,
+# videos.md) that 404 as .md -- landing pages with no markdown export, same
+# shape as the JSX-stub pages already known to be harmless elsewhere.
 exclude:
   - "*/llms-full.txt"
   - "*/codex-manual.md"
+  - "https://learn.chatgpt.com/guides/*"
+  - "https://learn.chatgpt.com/docs.md"
+  - "https://learn.chatgpt.com/resources.md"
+  - "https://learn.chatgpt.com/videos.md"
 # The live site does not collapse dash runs (Privacy & data -> privacy--data).
 slug_style: verbatim
-# ...and the bodies cross-reference each other under that same second host, so
-# the link graph needs to know it is an alias for base_url. Without this line
-# Codex's 600 internal links all look external and it has no graph at all.
+# Page bodies still link internally with a root-relative "/codex/<slug>" prefix
+# -- a holdover from the old information architecture -- even though no page is
+# actually served from that path anymore. Without this alias every internal
+# link 404s against the index and the link graph is empty.
 link_bases:
-  - https://learn.chatgpt.com/docs/
-expect_pages: 128
+  - https://learn.chatgpt.com/codex/
+expect_pages: 135
